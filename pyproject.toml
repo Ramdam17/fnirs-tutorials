@@ -1,0 +1,26 @@
+[project]
+name = "fnirs-tutorials"
+version = "0.1.0"
+description = "Onboarding tutorial series on fNIRS analysis in Python, from photons to group statistics."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    # Cedalion is pinned to a git tag because its PyPI release (25.1.0) lags the release branch.
+    "cedalion @ git+https://github.com/ibs-lab/cedalion@v26.5.1",
+    "nirsimple",
+    # snirf is the maintained successor of pysnirf2 (which breaks on numpy 2); used for SNIRF validation.
+    "snirf",
+    "ipykernel",
+]
+
+[dependency-groups]
+dev = ["pytest", "ruff", "nbconvert", "papermill"]
+
+[tool.uv]
+package = false
+# Cedalion 26.5.1 pins scipy==1.15.*. The scipy 1.15.x macOS arm64 wheels fail to load on
+# macOS 27 (dyld rejects the __DATA/__thread_bss section of _spropack). 1.16.3 loads; measured
+# 2026-10-31. scipy 1.16 removed scipy._lib._util._lazywhere, which statsmodels 0.14.4 (also
+# pinned by Cedalion) imports, so statsmodels is lifted to the last 0.14 patch release as well.
+# Cedalion's own test suite is run against these overrides (see COMPAT.md).
+override-dependencies = ["scipy==1.16.3", "statsmodels==0.14.6"]

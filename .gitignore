@@ -1,0 +1,18 @@
+# Data are downloaded by scripts/download_data.py and never committed.
+data/
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+# Build artefacts
+_build/
+book/_build/
+# OS
+.DS_Store
+
+# Log written by snirf.validateSnirf in the working directory
+pysnirf2.log
+
+# sprint-forge working folder of the open sprint
+.sprint-forge/
