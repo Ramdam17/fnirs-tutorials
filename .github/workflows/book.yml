@@ -3,7 +3,7 @@
 # The notebooks are executed headless by pytest (tests/test_notebooks.py), which writes
 # the executed copies under _build/executed/. scripts/build_book.py then builds the site
 # from those copies, without --execute, and checks the pages MyST built. The site is
-# deployed to GitHub Pages only from main.
+# deployed to GitHub Pages only for a push to main.
 #
 # Every action is pinned to the full version that `gh api repos/<owner>/<action>/releases/latest`
 # returned on 2026-11-11, and the inputs used below were read in the action.yml of that
@@ -21,15 +21,22 @@ on:
 permissions:
   contents: read
 
-# One run per event and ref. A newer push to a branch cancels the run it supersedes; on
-# main a run in progress is never cancelled, so that a deployment is not cut short. The
-# event name is part of the group because GitHub keeps one pending run per group: a manual
-# run on main (the timing runs) would otherwise share a group with the pushes to main and
-# could be cancelled while it waits behind one. A push and a manual run on main therefore
-# do not share a group, and the deploy job's own `pages` group still serialises the
-# deployments. A pull request from a branch of this repository still runs once for the
-# push and once for the pull request, because the two runs have different events and refs
-# (refs/heads/<branch> and refs/pull/<number>/merge).
+# One run per event and ref, and only a push to main deploys. The content of the site is
+# the content of main: a manual run and a run for a pull request or another branch build,
+# test and measure, and never deploy. A newer push to a branch cancels the run it
+# supersedes; on main a run in progress is never cancelled, so a deployment is not cut
+# short, and the pushes to main are served in the order they arrive. GitHub keeps one
+# running and one pending run per group, so when a third push arrives the pending run is
+# replaced by it: that run is cancelled and its timings are lost, but its commit is
+# inside the newer one. The event name is part of the group so that a manual run on main
+# (the timing runs) does not take the place of a push in the queue. A pull request from a
+# branch of this repository still runs twice, once for the push and once for the pull
+# request, because the two runs have different events and refs (refs/heads/<branch> and
+# refs/pull/<number>/merge); neither deploys. The `pages` group of the deploy job orders the
+# deployments of the runs that reach it. A re-run of an older push run on main keeps its
+# commit, so the deploy job compares that commit with the head of main before it deploys
+# and skips the deployment when they differ; to deploy again by hand, re-run the push run
+# of the head. These rules are taken from the documentation of GitHub Actions.
 concurrency:
   group: book-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -146,7 +153,7 @@ jobs:
 
   deploy:
     needs: build
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       pages: write
@@ -160,6 +167,31 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      # A public repository answers git ls-remote without credentials, so this step needs no
+      # token and no permission. It fails when the answer is empty or the command fails: the
+      # job never deploys on a doubt. When the commit of this run is no longer the head of
+      # main (a re-run of an older run), it deploys nothing and the job ends green.
+      - name: Check that this commit is the head of main
+        id: head
+        env:
+          REMOTE: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          head="$(git ls-remote "$REMOTE" refs/heads/main | cut -f1)"
+          echo "head of main: ${head:-<empty>}"
+          echo "this run:     ${GITHUB_SHA}"
+          if [ -z "$head" ]; then
+            echo "::error::git ls-remote returned no commit for refs/heads/main; nothing is deployed on a doubt."
+            exit 1
+          fi
+          if [ "$head" = "${GITHUB_SHA}" ]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "current=false" >> "$GITHUB_OUTPUT"
+            echo "This commit is no longer the head of main, so an older site would replace a newer one: nothing is deployed."
+          fi
+
       - name: Deploy to GitHub Pages
         id: deployment
+        if: steps.head.outputs.current == 'true'
         uses: actions/deploy-pages@v5.0.1
