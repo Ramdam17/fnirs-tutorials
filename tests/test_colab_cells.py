@@ -684,6 +684,11 @@ def test_one_link_and_one_cell_even_after_hand_additions(project: Path) -> None:
     assert len(links) == 1 and len(tagged) == 1
 
 
+AUTHOR_BADGE = (
+    "[![Run it](https://example.org/my-badge.png)]"
+    f"(https://colab.research.google.com/github/{CONFIG.repository}"
+    "/blob/main/book/a.ipynb)"
+)
 OLD_BADGE = (
     "[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)]"
     f"(https://colab.research.google.com/github/{CONFIG.repository}"
@@ -705,11 +710,8 @@ LINK_MAIN = (
         "# T\n\n\nText",
         f"# T\n\n{LINK_MAIN}\n\nText",
         f"# T\n\n{LINK_MAIN}",
-        f"# T\n{OLD_BADGE}\n\nText",
-        f"# T\n{OLD_BADGE}",
         f"Intro line\n# T\n\nText\n{LINK_MAIN}\nMore",
         f"{LINK_MAIN}\n# T\n\nText",
-        f"{OLD_BADGE}\n# T\n\nText",
     ],
     ids=[
         "title-alone-no-newline",
@@ -719,11 +721,8 @@ LINK_MAIN = (
         "title-two-blanks-text",
         "already-linked",
         "already-linked-alone",
-        "old-badge",
-        "old-badge-alone",
         "text-before-and-stray-link",
         "link-above-the-title",
-        "old-badge-above-the-title",
     ],
 )
 def test_every_shape_of_the_first_cell_is_written_once_and_stays(
@@ -748,13 +747,24 @@ def test_every_shape_of_the_first_cell_is_written_once_and_stays(
     assert ("Text" in first_source) == ("Text" in lines)
 
 
-def test_the_badge_image_of_an_earlier_version_is_replaced_by_the_text_link(
-    tmp_path: Path,
+@pytest.mark.parametrize("badge", [OLD_BADGE, AUTHOR_BADGE], ids=["colab", "author"])
+@pytest.mark.parametrize(
+    "template",
+    ["# T\n{b}\n\nText", "# T\n\nText\n{b}", "{b}\n# T\n\nText", "# T\n{b}"],
+    ids=["below-the-title", "at-the-end", "above-the-title", "alone-below-the-title"],
+)
+def test_a_badge_image_of_the_author_survives_a_write_unchanged(
+    tmp_path: Path, badge: str, template: str
 ) -> None:
-    root = _make_project(tmp_path / "project", f"# T\n{OLD_BADGE}\n\nText")
-    sync.main(["--root", str(root)])
-    text = "".join(_read(root, "book/a.ipynb")["cells"][0]["source"])
-    assert text == f"# T\n\n{LINK_MAIN}\n\nText"
+    root = _make_project(tmp_path / "project", template.format(b=badge))
+    assert sync.main(["--root", str(root)]) == 0
+    once = _snapshot(root)
+    assert sync.main(["--root", str(root), "--check"]) == 0
+    assert sync.main(["--root", str(root)]) == 0
+    assert _snapshot(root) == once
+    lines = "".join(_read(root, "book/a.ipynb")["cells"][0]["source"]).split("\n")
+    assert lines.count(badge) == 1
+    assert lines.count(LINK_MAIN) == 1
 
 
 def test_the_layout_is_kept_outside_the_lines_the_script_owns(project: Path) -> None:
@@ -864,7 +874,7 @@ def _link_squeezed(nb: dict[str, Any]) -> None:
     del nb["cells"][0]["source"][3]
 
 
-def _badge_image(nb: dict[str, Any]) -> None:
+def _link_replaced_by_a_badge(nb: dict[str, Any]) -> None:
     lines = nb["cells"][0]["source"]
     target = lines[2][lines[2].index("](") + 1 :].rstrip("\n")
     lines[2] = (
@@ -907,7 +917,7 @@ def _cell_shown(nb: dict[str, Any]) -> None:
     [
         (_drop_link, "link is missing"),
         (_link_other_ref, "link differs"),
-        (_badge_image, "link differs"),
+        (_link_replaced_by_a_badge, "link is missing"),
         (_link_squeezed, "blank line on each side"),
         (_edit_cell, "setup cell differs"),
         (_cell_not_first, "not the first code cell"),
@@ -989,6 +999,8 @@ AUTHOR_LINES = {
         f"[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)]({OTHER_URL})"
     ),
     "script-link-with-text-around": f"Run {LINK_MAIN} now",
+    "badge-colab-this-path": OLD_BADGE,
+    "badge-author-this-path": AUTHOR_BADGE,
     # A ref is one path segment: neither line below is the script's link to a.ipynb.
     "script-text-other-path-then-this-link": (
         f"[Open this notebook in Google Colab]({OTHER_URL}), or the solution "
@@ -1017,10 +1029,12 @@ def test_a_line_of_the_author_survives_a_write_unchanged(
     assert len(owned) == 1
 
 
-def test_only_the_two_shapes_for_this_notebook_are_the_scripts() -> None:
+def test_only_the_link_for_this_notebook_is_the_scripts() -> None:
     mine = sync.owned_line
     notebook = "book/a.ipynb"
-    assert mine(LINK_MAIN, notebook, CONFIG) and mine(OLD_BADGE, notebook, CONFIG)
+    assert mine(LINK_MAIN, notebook, CONFIG)
+    assert mine(OLD_BADGE, notebook, CONFIG) is None
+    assert mine(AUTHOR_BADGE, notebook, CONFIG) is None
     assert mine(LINK_MAIN + "\n", notebook, CONFIG)
     assert mine(LINK_MAIN, "book/other.ipynb", CONFIG) is None
     for line in AUTHOR_LINES.values():
@@ -1063,7 +1077,39 @@ def test_a_setup_cell_that_carries_a_ref_with_a_slash_is_refused(
     before = _snapshot(project)
     with caplog.at_level(logging.ERROR):
         assert sync.main(["--root", str(project)]) == 2
-        # `--check` reports a notebook it cannot render as a difference.
-        assert sync.main(["--root", str(project), "--check"]) == 1
-    assert "refused" in caplog.text
+        assert sync.main(["--root", str(project), "--check"]) == 2
+    assert "refused" in caplog.text and "--ref <tag or commit>" in caplog.text
     assert _snapshot(project) == before
+
+
+def test_check_reports_every_notebook_and_ends_with_2_if_one_is_refused(
+    project: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    assert sync.main(["--root", str(project)]) == 0
+    path = project / "book/a.ipynb"
+    text = path.read_text(encoding="utf-8")
+    path.write_text(
+        text.replace(f'_REF = \\"{CONFIG.default_ref}\\"', '_REF = \\"feature/x\\"'),
+        encoding="utf-8",
+    )
+    other = _read(project, "book/sub/b.ipynb")
+    other["cells"][0]["source"] = ["# T\n"]
+    _write(project, "book/sub/b.ipynb", other)
+    before = _snapshot(project)
+    with caplog.at_level(logging.ERROR):
+        assert sync.main(["--root", str(project), "--check"]) == 2
+    assert "book/a.ipynb: the ref it carries is refused" in caplog.text
+    assert "book/sub/b.ipynb: the Colab link is missing" in caplog.text
+    assert _snapshot(project) == before
+
+
+def test_check_ends_with_1_when_one_differs_and_none_is_refused(
+    project: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    assert sync.main(["--root", str(project)]) == 0
+    other = _read(project, "book/sub/b.ipynb")
+    other["cells"][0]["source"] = ["# T\n"]
+    _write(project, "book/sub/b.ipynb", other)
+    with caplog.at_level(logging.ERROR):
+        assert sync.main(["--root", str(project), "--check"]) == 1
+    assert "book/sub/b.ipynb: the Colab link is missing" in caplog.text

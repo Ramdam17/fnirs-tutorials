@@ -28,10 +28,19 @@ committed notebooks carry ``main``, so a reader on Colab gets the latest noteboo
 the latest package; a numbered release writes its tag into both with ``--ref``. A ref is
 one path segment and never holds a slash: a branch whose name holds one is named by its
 commit hash. The
-script also recognises, and replaces, the badge image line an earlier version wrote.
+script owns one shape of line, the link it writes for the notebook, and no other line of
+the cell, an image badge included.
 
 The line that the cell prints to report its duration starts with the prefix
 ``Setup time in seconds:``, followed by ``install``, ``download`` and ``total`` values.
+
+Exit codes
+----------
+0: every notebook is in order, or was written.
+1: only with ``--check``, every notebook could be judged and at least one differs.
+2: an input is refused (a configuration, a ``--ref``, an unreadable notebook, or a ref
+that a notebook carries and the script refuses); ``--check`` still reports every
+notebook before it ends with 2.
 
 When to use
 -----------
@@ -283,11 +292,11 @@ def link_line(config: Config, ref: str, notebook: str) -> str:
 def owned_line(line: str, notebook: str, config: Config) -> re.Match[str] | None:
     """Match a line of the first markdown cell that this script wrote for ``notebook``.
 
-    The script owns exactly two shapes, matched on the whole line: the text link it
-    writes, and the image badge an earlier version wrote, each pointing at the Colab URL
-    of this repository for this notebook, at any ref (one path segment with no slash, parenthesis or space, so the rest of the
-    target is this notebook's path exactly). Any other line, a link to another
-    notebook included, belongs to the author and is never touched.
+    The script owns exactly one shape, matched on the whole line: the text link it
+    writes, pointing at the Colab URL of this repository for this notebook, at any ref
+    (one path segment with no slash, parenthesis or space, so the rest of the target is
+    this notebook's path exactly). Any other line, a link to another notebook or an
+    image badge included, belongs to the author and is never touched.
 
     Returns
     -------
@@ -300,15 +309,7 @@ def owned_line(line: str, notebook: str, config: Config) -> re.Match[str] | None
         + re.escape(notebook)
         + r"\)"
     )
-    shapes = (
-        re.escape(f"[{LINK_TEXT}]") + target,
-        r"\[!\[[^\]\n]*\]\([^()\s]+\)\]" + target,
-    )
-    for shape in shapes:
-        match = re.fullmatch(shape, line.rstrip("\n"))
-        if match:
-            return match
-    return None
+    return re.fullmatch(re.escape(f"[{LINK_TEXT}]") + target, line.rstrip("\n"))
 
 
 def _to_lines(text: str) -> list[str]:
@@ -562,8 +563,8 @@ def check_notebook(
         problems.append(f"{len(links)} Colab links are present, one is expected")
     elif links[0] != wanted:
         problems.append(
-            f"the Colab link differs (a different ref than the setup cell, an image "
-            f"badge, or another notebook): expected {wanted!r}, found {links[0]!r}"
+            f"the Colab link differs (a different ref than the setup cell): "
+            f"expected {wanted!r}, found {links[0]!r}"
         )
     elif _source_lines(first) != _source_lines(_first_markdown(expected)):
         problems.append(
@@ -646,7 +647,7 @@ def _parse_arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="write nothing; exit non-zero and name what differs",
+        help="write nothing and report every notebook; exit 0 when all match, 1 when one differs, 2 when one is refused",
     )
     parser.add_argument(
         "--root", type=Path, default=DEFAULT_ROOT, help="repository root"
@@ -660,12 +661,13 @@ def run(root: Path, ref: str | None, check: bool) -> int:
     Returns
     -------
     int
-        0 when all is in order, 1 when ``check`` finds a difference.
+        0 when all is in order, 1 when ``check`` judged every notebook and at least one
+        differs, 2 (``EXIT_BAD_INPUT``) when ``check`` met a notebook it refuses.
 
     Raises
     ------
     SyncError
-        If an input is refused; nothing is written then.
+        If an input is refused; nothing is written then (``main`` turns it into 2).
     """
     config = load_config(root / CONFIG_SUBPATH)
     overrides = read_overrides(root / PYPROJECT_SUBPATH)
@@ -679,6 +681,7 @@ def run(root: Path, ref: str | None, check: bool) -> int:
 
     pending: list[tuple[Path, str]] = []
     failed = False
+    refused = False
     for notebook in notebooks:
         path = root / notebook
         nb, canonical = load_notebook(path)
@@ -688,12 +691,14 @@ def run(root: Path, ref: str | None, check: bool) -> int:
             try:
                 validate_ref(target)
             except SyncError as error:
+                message = (
+                    f"{notebook}: the ref it carries is refused: {error} Repair it by "
+                    "running the script with `--ref <tag or commit>`."
+                )
                 if not check:
-                    raise SyncError(
-                        f"{notebook}: the ref it carries: {error}"
-                    ) from error
-                logger.error("%s: the ref it carries is refused: %s", notebook, error)
-                failed = True
+                    raise SyncError(message) from error
+                logger.error("%s", message)
+                refused = True
                 continue
         if check:
             problems = check_notebook(nb, notebook, target, config, template, overrides)
@@ -715,6 +720,8 @@ def run(root: Path, ref: str | None, check: bool) -> int:
         logger.info("%s: ref %s", notebook, target)
 
     if check:
+        if refused:
+            return EXIT_BAD_INPUT
         if failed:
             return EXIT_DIFFERS
         logger.info("%d notebook(s) match what the script writes.", len(notebooks))
