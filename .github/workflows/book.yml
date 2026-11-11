@@ -21,13 +21,17 @@ on:
 permissions:
   contents: read
 
-# One run per ref. A newer push to a branch cancels the run it supersedes; on main a run
-# in progress is never cancelled, so that a deployment is not cut short. A pull request
-# from a branch of this repository still runs once for the push and once for the pull
-# request, because the two runs have different refs (refs/heads/<branch> and
-# refs/pull/<number>/merge) and so different groups.
+# One run per event and ref. A newer push to a branch cancels the run it supersedes; on
+# main a run in progress is never cancelled, so that a deployment is not cut short. The
+# event name is part of the group because GitHub keeps one pending run per group: a manual
+# run on main (the timing runs) would otherwise share a group with the pushes to main and
+# could be cancelled while it waits behind one. A push and a manual run on main therefore
+# do not share a group, and the deploy job's own `pages` group still serialises the
+# deployments. A pull request from a branch of this repository still runs once for the
+# push and once for the pull request, because the two runs have different events and refs
+# (refs/heads/<branch> and refs/pull/<number>/merge).
 concurrency:
-  group: book-${{ github.ref }}
+  group: book-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
