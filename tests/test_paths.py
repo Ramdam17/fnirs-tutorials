@@ -22,8 +22,8 @@ def fake_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture
 def no_marker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A module anchor with no marker file above it."""
-    module_dir = tmp_path / "isolated" / "pkg"
+    """A module anchor in a valid src layout whose root has no marker file."""
+    module_dir = tmp_path / "isolated" / "src" / "pkg"
     module_dir.mkdir(parents=True)
     monkeypatch.setattr(paths, "_ANCHOR", module_dir / "paths.py")
     monkeypatch.delenv(paths.DATA_DIR_ENV, raising=False)
@@ -147,3 +147,27 @@ def test_marker_two_levels_up_without_src_folder_is_ignored(
     monkeypatch.setattr(paths, "_ANCHOR", package / "paths.py")
     with pytest.raises(paths.RepoRootNotFoundError):
         paths.repo_root()
+
+
+def test_marker_that_is_a_directory_is_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module_dir = tmp_path / "repo" / "src" / "pkg"
+    module_dir.mkdir(parents=True)
+    (tmp_path / "repo" / paths.ROOT_MARKER).mkdir()
+    monkeypatch.setattr(paths, "_ANCHOR", module_dir / "paths.py")
+    with pytest.raises(paths.RepoRootNotFoundError):
+        paths.repo_root()
+
+
+def test_symlinked_package_resolves_to_the_real_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_pkg = tmp_path / "checkout" / "src" / "pkg"
+    real_pkg.mkdir(parents=True)
+    (tmp_path / "checkout" / paths.ROOT_MARKER).write_text("version: 1\n")
+    (real_pkg / "paths.py").write_text("")
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "elsewhere" / "pkg").symlink_to(real_pkg, target_is_directory=True)
+    monkeypatch.setattr(paths, "_ANCHOR", tmp_path / "elsewhere" / "pkg" / "paths.py")
+    assert paths.repo_root() == (tmp_path / "checkout").resolve()
