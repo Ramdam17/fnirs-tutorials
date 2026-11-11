@@ -116,9 +116,24 @@ jobs:
       - name: Check the format
         run: uv run ruff format --check .
 
+      # The committed notebooks must be what the script writes for the ref they carry
+      # (the badge, the setup cell and the Colab runtime request), so that a hand edit of
+      # the setup cell, or a change of the template, of config/colab.yaml or of the
+      # overrides of pyproject.toml that was not written into the notebooks, fails here.
+      - name: Check the Colab cells
+        run: uv run python scripts/sync_colab_cells.py --check
+
       # The notebooks are executed once, by the next step, so this step leaves them out.
       - name: Test (no notebook of the book)
         run: uv run python -m pytest --ignore tests/test_notebooks.py
+
+      # A committed file cannot name its own commit, so the committed notebooks carry the
+      # ref main. This step points the Colab badge and the setup cell of the checkout at the
+      # commit that is built, so that the pages of this run link to the notebooks they
+      # were built from. It runs before the notebooks are executed because the executed
+      # copies, and the pages built from them, are made from these files.
+      - name: Point the Colab links at this commit
+        run: uv run python scripts/sync_colab_cells.py --ref "$GITHUB_SHA"
 
       - name: Execute the notebooks
         id: notebooks

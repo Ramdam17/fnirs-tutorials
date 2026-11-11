@@ -1,0 +1,33 @@
+# Parameters of the Google Colab path of the book. They are read by
+# scripts/sync_colab_cells.py, which writes the badge, the setup cell and the runtime
+# request into every notebook, and by tests/test_colab_cells.py.
+
+# GitHub repository that holds the book, as <owner>/<name>. It is the one `main` is
+# pushed to; the badge, the install and the download all name it.
+repository: Ramdam17/fnirs-tutorials
+
+# Ref (branch, tag or commit) written into a notebook that carries none. The committed
+# notebooks carry `main`; the workflow rewrites it to the commit that built the page.
+default_ref: main
+
+# Colab runtime version every notebook asks for, as a string. Measured on 2026-11-11: the
+# version "2026.07" runs Python 3.12.13, and a notebook opened from GitHub keeps the
+# request written in its metadata. Google keeps a past runtime version for one year after
+# its release (https://research.google.com/colaboratory/runtime-version-faq.html, read on
+# 2026-11-11), so "2026.07" has to be replaced before July 2027.
+colab_runtime_version: "2026.07"
+
+# Python version that runtime runs, as "<major>.<minor>". Measured on 2026-11-11 with
+# sys.version on that runtime. The setup cell compares it with the running Python, and a
+# test checks that `requires-python` of pyproject.toml accepts it.
+python_version: "3.12"
+
+# Folders on the Colab machine, not on an author's machine: they are absolute paths of
+# the runtime, where /content is the working folder.
+# Data downloaded by scripts/download_data.py (becomes FNIRS_DATA_DIR).
+data_dir: /content/fnirs-data
+# Cache of precomputed results (becomes FNIRS_CACHE_DIR).
+cache_dir: /content/fnirs-cache
+# Files of the setup itself: the override file, the fetched download script and the
+# marker that records what was installed.
+setup_dir: /content/fnirs-setup
