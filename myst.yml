@@ -17,4 +17,7 @@ project:
     - file: book/smoke/smoke_cedalion.ipynb
     - file: book/glossary.md
 site:
-  template: book-theme
+  # Pinned to one commit of myst-templates/book-theme: the bare name 'book-theme'
+  # follows the theme's main branch. To move the pin, change the commit, rebuild from an
+  # empty _build/templates, and update COMPAT.md.
+  template: https://github.com/myst-templates/book-theme/archive/08951401cf4aa6710f040fe34dcf0c1351a08639.zip

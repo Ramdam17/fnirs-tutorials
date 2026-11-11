@@ -31,6 +31,9 @@ The site is built with Jupyter Book 2, which is a Python package that bundles th
 | MyST engine (mystmd) | bundled, not installed separately | `uv pip list` shows no `mystmd` package; the bundle `jupyter_book/dist/jupyter-book.cjs` contains `myst-cli` 1.11.0 (read from its source, since `jupyter book --version` reports only the Jupyter Book version) |
 | Node.js | v26.12.0 on the Mac | `node --version` |
 | nodeenv | 1.12.0 | `uv pip list`; used only when no suitable Node.js is found |
+| book-theme (site theme) | commit `08951401cf4aa6710f040fe34dcf0c1351a08639`, 2026-11-10, message "v2.0.0 from ea08e186" | the zip comment of the archive that the first build downloaded (`_build/templates/site/myst/book-theme/template.zip`); `myst.yml` pins the archive of this commit |
+
+The theme repository `myst-templates/book-theme` has no tag, so the pin is a commit; the bare name `book-theme` would follow its `main` branch. The pinned archive was rebuilt from an empty `_build/templates` on 2026-11-11 and renders the same three pages.
 
 The Node.js requirement is read from the Jupyter Book source, not from the documentation. The check in `jupyter_book/__main__.py` accepts Node.js 18, 20 or 22 and later, and its error message says "Jupyter Book requires node 18, 20, or 22+". When no suitable Node.js is on the path, the tool offers to download Node.js 22.17.0 with nodeenv into a user data folder, after a prompt that the environment variable `JB_ALLOW_NODEENV` answers in advance.
 
