@@ -236,6 +236,97 @@ def test_toc_refuses_a_markdown_page_with_a_kernelspec(tmp_path: Path) -> None:
         list_notebooks(myst)
 
 
+_CODE_CELL = "```{code-cell} python\nprint(1)\n```\n"
+_REFUSED_PAGES = {
+    # row: .md with a top-level kernelspec (also without any executable node)
+    "top-level kernelspec, no executable node": (
+        "---\nkernelspec:\n  name: python3\n---\n\n# Title\n",
+        "kernelspec",
+    ),
+    "top-level kernelspec with a code cell": (
+        "---\nkernelspec:\n  name: python3\n---\n\n" + _CODE_CELL,
+        "kernelspec",
+    ),
+    # row: .md with jupyter.kernelspec
+    "nested jupyter.kernelspec": (
+        "---\njupyter:\n  kernelspec:\n    name: python3\n---\n\n# Title\n",
+        "kernelspec",
+    ),
+    # row: .md with {code-cell} or {eval} and no kernelspec
+    "code cell without kernelspec": ("# Title\n\n" + _CODE_CELL, "code-cell"),
+    "colon-fenced code cell": ("# T\n\n:::{code-cell} python\n1\n:::\n", "code-cell"),
+    "eval role without kernelspec": ("The value is {eval}`1 + 1`.\n", "eval"),
+    # skip semantics settled in the bundle (lines 207880 to 207886)
+    "skip false wins over skip_execution true": (
+        "---\nkernelspec:\n  name: p\nexecute:\n  skip: false\nskip_execution: true\n---\n",
+        "kernelspec",
+    ),
+    "skip as a string is not a boolean": (
+        "---\nkernelspec:\n  name: p\nexecute:\n  skip: 'true'\n---\n",
+        "kernelspec",
+    ),
+}
+_ACCEPTED_PAGES = {
+    "jupytext key without kernelspec": "---\njupytext:\n  formats: md\n---\n\n# T\n",
+    "null kernelspec": "---\nkernelspec: null\n---\n\n# Title\n",
+    "null nested kernelspec": "---\njupyter:\n  kernelspec: null\n---\n\n# T\n",
+    "kernelspec with execute.skip true": (
+        "---\nkernelspec:\n  name: p\nexecute:\n  skip: true\n---\n"
+    ),
+    "kernelspec with skip_execution true": (
+        "---\nkernelspec:\n  name: p\nskip_execution: true\n---\n"
+    ),
+    "code cell with execute.skip true": (
+        "---\nexecute:\n  skip: true\n---\n\n" + _CODE_CELL
+    ),
+    "skip_execution true with a null execute.skip": (
+        "---\nkernelspec:\n  name: p\nexecute:\n  skip: null\nskip_execution: true\n---\n"
+    ),
+    "plain page": "# Title\n\nSome text.\n",
+}
+
+
+@pytest.mark.parametrize(
+    "name",
+    [pytest.param(key, id=key.replace(" ", "-")) for key in sorted(_REFUSED_PAGES)],
+)
+def test_toc_refuses_a_markdown_page_meant_for_execution(
+    tmp_path: Path, name: str
+) -> None:
+    """Each sign of a page meant for execution is refused, naming entry and page."""
+    page, sign = _REFUSED_PAGES[name]
+    myst = _project(tmp_path, "    - file: page.md\n", [])
+    _write(tmp_path / "page.md", page)
+    with pytest.raises(ValueError, match="page.md") as raised:
+        list_notebooks(myst)
+    assert sign in str(raised.value)
+    assert "execute: {skip: true}" in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [pytest.param(key, id=key.replace(" ", "-")) for key in sorted(_ACCEPTED_PAGES)],
+)
+def test_toc_accepts_a_markdown_page_not_meant_for_execution(
+    tmp_path: Path, name: str
+) -> None:
+    myst = _project(tmp_path, "    - file: page.md\n", [])
+    _write(tmp_path / "page.md", _ACCEPTED_PAGES[name])
+    assert list_notebooks(myst) == []
+
+
+def test_toc_refuses_a_myst_json_entry(tmp_path: Path) -> None:
+    """The runner cannot tell whether MyST executes it, and this was not measured."""
+    myst = _project(tmp_path, "    - file: page.myst.json\n", ["page.myst.json"])
+    with pytest.raises(ValueError, match="not measured"):
+        list_notebooks(myst)
+
+
+def test_toc_accepts_a_tex_entry(tmp_path: Path) -> None:
+    myst = _project(tmp_path, "    - file: paper.tex\n", ["paper.tex"])
+    assert list_notebooks(myst) == []
+
+
 def test_toc_accepts_a_markdown_page_with_other_front_matter(tmp_path: Path) -> None:
     myst = _project(tmp_path, "    - file: plain.md\n", [])
     _write(tmp_path / "plain.md", "---\ntitle: Plain\n---\n\n# Title\n")
@@ -378,6 +469,29 @@ def test_reset_empties_the_timings_file(tmp_path: Path) -> None:
 # --- The command itself, in a subprocess ----------------------------------------------
 
 
+def echo_child_output(*streams: str | bytes | None) -> None:
+    """Write the output of the child process, every line prefixed with ``[child] ``.
+
+    Parameters
+    ----------
+    *streams : str or bytes or None
+        Captured streams. ``subprocess.TimeoutExpired`` carries ``bytes`` or ``None``
+        on POSIX even when ``text=True`` was asked (``subprocess.py``, lines 1253 to
+        1256 of Python 3.12), so all three types are accepted; bytes are decoded with
+        ``errors="replace"``.
+    """
+    for stream in streams:
+        if stream is None:
+            continue
+        text = (
+            stream.decode("utf-8", errors="replace")
+            if isinstance(stream, bytes)
+            else stream
+        )
+        for line in text.splitlines():
+            sys.stdout.write(f"{CHILD_PREFIX}{line}\n")
+
+
 def _run_command_in_temporary_repository(
     tmp_path: Path, fixture: str, timeouts: str
 ) -> tuple[int, dict[str, dict[str, object]]]:
@@ -413,31 +527,45 @@ def _run_command_in_temporary_repository(
     stale.parent.mkdir(parents=True)
     stale.write_bytes((FIXTURES / "failing.ipynb").read_bytes())
 
-    completed = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "tests/test_notebooks.py",
-            "-p",
-            "no:cacheprovider",
-        ],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=COMMAND_SUBPROCESS_TIMEOUT_S,
-    )
-    # Both streams in full, each line prefixed so that a tool reading this output
-    # cannot take a line of the child for a line of the suite.
-    for stream in (completed.stdout, completed.stderr):
-        for line in stream.splitlines():
-            sys.stdout.write(f"{CHILD_PREFIX}{line}\n")
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "tests/test_notebooks.py",
+                "-p",
+                "no:cacheprovider",
+            ],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=COMMAND_SUBPROCESS_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as expired:
+        # The exception carries what the child wrote before it was killed.
+        echo_child_output(expired.stdout, expired.stderr)
+        raise
+    echo_child_output(completed.stdout, completed.stderr)
     assert not stale.exists(), "the command left a stale executed copy"
     timings = json.loads(
         (repo / "build-reports" / "notebook-timings.json").read_text(encoding="utf-8")
     )
     return completed.returncode, timings
+
+
+@pytest.mark.parametrize(
+    "stream", ["one\ntwo\n", b"one\ntwo\n", None], ids=["str", "bytes", "none"]
+)
+def test_echo_child_output_prefixes_every_line(
+    stream: str | bytes | None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The echo accepts ``str``, ``bytes`` and ``None`` and prefixes each line."""
+    echo_child_output(stream, b"bad \xff byte\n")
+    lines = capsys.readouterr().out.splitlines()
+    expected = [] if stream is None else [f"{CHILD_PREFIX}one", f"{CHILD_PREFIX}two"]
+    assert lines == [*expected, f"{CHILD_PREFIX}bad \ufffd byte"]
 
 
 def test_command_exits_non_zero_when_a_notebook_raises(tmp_path: Path) -> None:

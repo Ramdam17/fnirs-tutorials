@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -86,11 +87,17 @@ _TOC_ENTRY_KEYS = frozenset(
 )
 _NOTEBOOK_SUFFIX = ".ipynb"
 _MARKDOWN_SUFFIX = ".md"
+_MYST_JSON_SUFFIX = ".myst.json"
+# Textual sign of a page meant for execution: a {code-cell} directive opened by a code,
+# tilde or colon fence, or an {eval} role. A heuristic (see _refuse_executable_markdown).
+_EXECUTABLE_TEXT = re.compile(
+    r"^[ \t]*(?:`{3,}|~{3,}|:{3,})[ \t]*\{code-cell\}|\{eval\}`", re.MULTILINE
+)
 # Extensions that MyST accepts for a ``file:`` entry (``VALID_FILE_EXTENSIONS`` in the
 # bundle of jupyter-book 2.1.7, compared in lower case). MyST also completes a missing
 # extension by probing the disk; this runner refuses such an entry instead, so that a
 # notebook is never skipped because its extension was left out.
-_VALID_SUFFIXES = (_MARKDOWN_SUFFIX, _NOTEBOOK_SUFFIX, ".tex", ".myst.json")
+_VALID_SUFFIXES = (_MARKDOWN_SUFFIX, _NOTEBOOK_SUFFIX, ".tex", _MYST_JSON_SUFFIX)
 
 
 @dataclass(frozen=True)
@@ -147,19 +154,67 @@ class TimeoutConfig:
         return self.timeouts.get(notebook, self.default_timeout_s)
 
 
-def _refuse_executable_markdown(page: Path, where: str) -> None:
-    """Refuse a markdown page whose front matter declares a ``kernelspec``.
+def _front_matter_of(text: str, where: str, page: Path) -> dict[str, Any]:
+    """Return the YAML front matter of a markdown text as a mapping (empty if none)."""
+    if not text.startswith("---"):
+        return {}
+    parts = text.split("\n---", 1)
+    if len(parts) < 2:
+        return {}
+    try:
+        front_matter = yaml.safe_load(parts[0][3:]) or {}
+    except yaml.YAMLError as error:
+        raise ValueError(
+            f"{where}: markdown page {page.name!r} opens with a '---' block that is "
+            "not valid YAML. Fix the front matter, or write a horizontal rule as '***'."
+        ) from error
+    return front_matter if isinstance(front_matter, dict) else {}
 
-    A MyST build with ``--execute`` runs such a page like a notebook, whereas this
-    runner only lists ``.ipynb`` files, so the page would be published unexecuted.
+
+def _skips_execution(front_matter: dict[str, Any]) -> bool:
+    """Tell whether the author excluded the page from execution, as MyST reads it.
+
+    ``execute.skip`` wins; the deprecated ``skip_execution`` fills it only when
+    ``execute`` is not a mapping or holds no non-null ``skip`` (bundle lines 207880 to
+    207886). Only the YAML boolean true counts: ``"true"`` as a string is not accepted,
+    which can only err towards a refusal.
+    """
+    execute = front_matter.get("execute")
+    skip = execute.get("skip") if isinstance(execute, dict) else None
+    if skip is not None:
+        return skip is True
+    return front_matter.get("skip_execution") is True
+
+
+def _refuse_executable_markdown(page: Path, where: str) -> None:
+    """Refuse a markdown page that is meant for execution and not excluded from it.
+
+    The book of candidate (a) is built from the executed notebooks without
+    ``--execute``, so a markdown page with code cells would be published with no
+    output and nothing would report it. The rule mirrors what the installed
+    ``jupyter-book.cjs`` does, and is stricter where it cannot see the nodes.
+
+    A page is meant for execution when one of two signs is present.
+
+    * Its front matter holds a non-null ``kernelspec``, at the top level or under a
+      ``jupyter`` mapping. MyST lifts the nested key for every page
+      (``unnestKernelSpec``, lines 208099 to 208107, called at line 254028) and treats
+      a null value as absent (``defined`` is ``val != null``, line 202133).
+    * Its text holds a ``{code-cell}`` directive or an ``{eval}`` role. MyST turns them
+      into the executable nodes (lines 284596 to 284606 and 289525) and, without a
+      kernelspec, only writes a file error in its execution step (line 307279), which
+      does not run here. This detection is textual, so it is a heuristic: it can wrongly
+      match a page that shows the syntax inside a literal block.
+
+    Such a page is accepted only if its author excluded it with ``execute: {skip:
+    true}`` or the deprecated ``skip_execution: true`` (lines 207880 to 207886; see
+    :func:`_skips_execution`). A page with a kernelspec and no executable node is
+    refused all the same, because the runner does not parse the MyST nodes.
 
     A page that opens with ``---`` is read as having a front matter, up to the next
-    ``\\n---``. That block is parsed as YAML. A block that parses to something other
-    than a mapping (for example prose between two horizontal rules) is ordinary
-    markdown and is accepted. A block that is not valid YAML, or a page that is not
-    UTF-8, is refused with an error naming the entry and the page: the ambiguity is
-    settled by the author, who either fixes the front matter or writes the rule as
-    ``***``, rather than by a guess of this runner.
+    ``\\n---``. A block that parses to something other than a mapping (prose between
+    two horizontal rules) is ordinary markdown. A block that is not valid YAML, or a
+    page that is not UTF-8, is refused with an error naming the entry and the page.
 
     Parameters
     ----------
@@ -171,8 +226,8 @@ def _refuse_executable_markdown(page: Path, where: str) -> None:
     Raises
     ------
     ValueError
-        If the YAML front matter of the page has a ``kernelspec`` key, if the page is
-        not UTF-8, or if its leading ``---`` block is not valid YAML.
+        If the page is meant for execution and not excluded, is not UTF-8, or opens
+        with a ``---`` block that is not valid YAML.
     """
     if not page.is_file():
         return
@@ -182,24 +237,22 @@ def _refuse_executable_markdown(page: Path, where: str) -> None:
         raise ValueError(
             f"{where}: markdown page {page.name!r} is not UTF-8."
         ) from error
-    if not text.startswith("---"):
+    front_matter = _front_matter_of(text, where, page)
+    jupyter = front_matter.get("jupyter")
+    nested = jupyter.get("kernelspec") if isinstance(jupyter, dict) else None
+    signs = []
+    if front_matter.get("kernelspec") is not None or nested is not None:
+        signs.append("a kernelspec in its front matter")
+    if _EXECUTABLE_TEXT.search(text):
+        signs.append("a {code-cell} directive or an {eval} role in its text")
+    if not signs or _skips_execution(front_matter):
         return
-    parts = text.split("\n---", 1)
-    if len(parts) < 2:
-        return
-    try:
-        front_matter = yaml.safe_load(parts[0][3:]) or {}
-    except yaml.YAMLError as error:
-        raise ValueError(
-            f"{where}: markdown page {page.name!r} opens with a '---' block that is "
-            "not valid YAML. Fix the front matter, or write a horizontal rule as '***'."
-        ) from error
-    if isinstance(front_matter, dict) and "kernelspec" in front_matter:
-        raise ValueError(
-            f"{where}: markdown page {page.name!r} declares a kernelspec, so a MyST "
-            "build would execute it, and this runner would not. Convert it to a "
-            "notebook or remove the kernelspec."
-        )
+    raise ValueError(
+        f"{where}: markdown page {page.name!r} is meant for execution ("
+        f"{' and '.join(signs)}), so a MyST build with --execute would run it and "
+        "this runner would not. Convert it to a notebook, or set "
+        "'execute: {skip: true}' in its front matter."
+    )
 
 
 def _collect_notebooks(entries: Any, where: str, root: Path, found: list[str]) -> None:
@@ -251,6 +304,13 @@ def _collect_notebooks(entries: Any, where: str, root: Path, found: list[str]) -
                 )
             if lowered.endswith(_NOTEBOOK_SUFFIX):
                 found.append(Path(str(file_name)).as_posix())
+            elif lowered.endswith(_MYST_JSON_SUFFIX):
+                raise ValueError(
+                    f"{here}: file entry {file_name!r} is a .myst.json page. This runner "
+                    "cannot tell whether a MyST build would execute it, and this was not "
+                    "measured; the book plans no such page. Use a notebook or a markdown "
+                    "page, or measure the case first."
+                )
             elif lowered.endswith(_MARKDOWN_SUFFIX):
                 _refuse_executable_markdown(root / str(file_name), here)
         if "children" in entry:
