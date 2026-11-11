@@ -1,7 +1,15 @@
 """Matplotlib house style shared by all notebooks of the series.
 
-This is an aesthetic choice (a house style: dark canvas, airy layout, a vibrant
-categorical palette), not a methodological one, so it carries no citation.
+This is an aesthetic choice (a house style: light canvas, airy layout, a vibrant
+categorical palette), not a methodological one, so it carries no citation. The canvas
+is light so that a figure reads on both modes of the book and in print. The palette is
+the one of the lab's plotting standard, with four colours darkened one shade so that
+every colour reaches a contrast ratio of 3 to 1 on white. That threshold is the one
+that the Web Content Accessibility Guidelines 2.1 give for graphical objects (success
+criterion 1.4.11, https://www.w3.org/TR/WCAG21/#non-text-contrast), and the 4.5 to 1
+of criterion 1.4.3 (https://www.w3.org/TR/WCAG21/#contrast-minimum) is applied to the
+text colours. Those guidelines are written for web content, so applying their
+thresholds to figures is a choice of this project.
 """
 
 from __future__ import annotations
@@ -14,33 +22,33 @@ __all__ = ["PALETTE", "STYLE", "apply_style"]
 PALETTE: list[str] = [
     "#7c3aed",
     "#ec4899",
-    "#f59e0b",
-    "#10b981",
+    "#d97706",  # replaces #f59e0b, too pale on white (2.15 to 1)
+    "#059669",  # replaces #10b981, too pale on white (2.54 to 1)
     "#3b82f6",
     "#ef4444",
     "#8b5cf6",
-    "#06b6d4",
-    "#84cc16",
+    "#0891b2",  # replaces #06b6d4, too pale on white (2.43 to 1)
+    "#65a30d",  # replaces #84cc16, too pale on white (1.98 to 1)
 ]
 
 STYLE: dict[str, object] = {
     # Canvas
-    "figure.facecolor": "#0d1117",
-    "axes.facecolor": "#161b22",
-    "savefig.facecolor": "#0d1117",
+    "figure.facecolor": "#ffffff",
+    "axes.facecolor": "#ffffff",
+    "savefig.facecolor": "#ffffff",
     # Text
-    "text.color": "#e6edf3",
-    "axes.labelcolor": "#e6edf3",
-    "xtick.color": "#8b949e",
-    "ytick.color": "#8b949e",
-    "axes.titlecolor": "#ffffff",
+    "text.color": "#1f2328",
+    "axes.labelcolor": "#1f2328",
+    "xtick.color": "#656d76",
+    "ytick.color": "#656d76",
+    "axes.titlecolor": "#1f2328",
     # Spines
     "axes.spines.top": False,
     "axes.spines.right": False,
-    "axes.edgecolor": "#30363d",
+    "axes.edgecolor": "#d0d7de",
     # Grid
     "axes.grid": True,
-    "grid.color": "#21262d",
+    "grid.color": "#d8dee4",
     "grid.linewidth": 0.5,
     "grid.alpha": 0.8,
     # Typography
