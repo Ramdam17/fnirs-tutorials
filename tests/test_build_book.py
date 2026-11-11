@@ -6,8 +6,9 @@ is a parameter (``runner``): the tests give it a stand-in that writes page files
 
 The page files under ``tests/fixtures/built_pages/`` are real files written by MyST, not
 written by hand: jupyter-book 2.1.7 (myst-cli 1.11.0) built them on 2026-11-11 in one
-scratch project that holds one page per case, from the sources named by the file names,
-for example
+scratch project that holds one page per case, from the sources named by the file names.
+``tests/fixtures/built_pages/make_page_files.py`` makes them again; run it after an
+upgrade of Jupyter Book. For example
 ``code_cell.json`` comes from a markdown page that holds one ``{code-cell}`` and
 ``notebook_smoke.json`` from the executed smoke notebook of the book. They are small, so
 none is trimmed. Each keeps the ``location`` MyST gave it, ``/book/<stem>.md`` or
@@ -109,15 +110,18 @@ def make_project(
     stems: list[str],
     texts: dict[str, str] | None = None,
     executed: bool = True,
+    status: str = "passed",
 ) -> Path:
     """Write a repository-like folder for the pages of the given fixtures.
 
-    Notebooks get a source and, when ``executed`` is true, an executed copy that is newer.
+    Notebooks get a source and, when ``executed`` is true, an executed copy that is newer
+    and an entry with the given ``status`` in the timings file of the notebook command.
     Other pages get the text in ``texts`` (by stem) or a title.
     """
     root = tmp_path / "repo"
     texts = texts or {}
     toc = []
+    timings: dict[str, Any] = {}
     for stem in stems:
         path = page_path(stem)
         toc.append({"file": path})
@@ -131,11 +135,25 @@ def make_project(
                 copy.write_text('{"executed": true}', encoding="utf-8")
                 stamp = target.stat().st_mtime + 100
                 os.utime(copy, (stamp, stamp))
+                timings[path] = {
+                    "status": status,
+                    "wall_time_s": 1.0,
+                    "timeout_s": 300.0,
+                }
         else:
             target.write_text(texts.get(stem, "# A page\n"), encoding="utf-8")
     document = {"version": 1, "project": {"toc": toc}}
     (root / "myst.yml").write_text(yaml.safe_dump(document), encoding="utf-8")
+    if timings:
+        write_timings(root, timings)
     return root
+
+
+def write_timings(root: Path, timings: dict[str, Any]) -> None:
+    """Write the timings file of the notebook command."""
+    path = root / "build-reports" / "notebook-timings.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(timings), encoding="utf-8")
 
 
 def run_main(root: Path, runner: Any) -> int:
@@ -275,6 +293,7 @@ def test_a_failed_build_passes_its_exit_code_on(
     assert run_main(root, build) == 7
     assert "the book build exited with code 7" in caplog.text
     assert "the book is not built" in caplog.text
+    assert "runs with --strict" in caplog.text
 
 
 def test_no_executed_folder_asks_for_the_notebook_command(
@@ -481,7 +500,7 @@ def test_files_a_page_references_are_staged_and_data_is_not(
 # --------------------------------------------------------------------------------------
 
 
-def test_the_build_command_has_no_execute_flag_and_shows_its_output(
+def test_the_build_command_is_strict_has_no_execute_flag_and_shows_its_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     seen: dict[str, Any] = {}
@@ -499,7 +518,400 @@ def test_the_build_command_has_no_execute_flag_and_shows_its_output(
         "jupyter_book",
         "build",
         "--html",
+        "--strict",
     ]
     assert seen["kwargs"]["cwd"] == tmp_path
     # No redirection of the output and no changed environment (BASE_URL is inherited).
     assert not {"stdout", "stderr", "capture_output", "env"} & set(seen["kwargs"])
+
+
+# --------------------------------------------------------------------------------------
+# What the notebook command recorded, and the helper package
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("status", ["error", "timeout"])
+def test_a_notebook_recorded_as_failed_is_refused_and_named(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, status: str
+) -> None:
+    """The executed copy of a failed notebook shows the traceback; it is never built."""
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"], status=status)
+    build = FakeBuild(["notebook_smoke", "no_code"])
+    assert run_main(root, build) == build_book.EXIT_NOT_EXECUTED
+    assert (
+        f"notebook {NOTEBOOK!r} was recorded with status {status!r}, not 'passed'"
+        in (caplog.text)
+    )
+    assert RUN_NOTEBOOKS in caplog.text
+    assert build.calls == []
+
+
+def test_a_notebook_without_an_entry_in_the_timings_is_refused(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"])
+    write_timings(root, {"book/other.ipynb": {"status": "passed"}})
+    build = FakeBuild(["notebook_smoke", "no_code"])
+    assert run_main(root, build) == build_book.EXIT_NOT_EXECUTED
+    assert f"notebook {NOTEBOOK!r} has no entry in" in caplog.text
+    assert "notebook-timings.json" in caplog.text
+    assert build.calls == []
+
+
+def test_a_missing_timings_file_has_its_own_message(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"])
+    (root / "build-reports" / "notebook-timings.json").unlink()
+    build = FakeBuild(["notebook_smoke", "no_code"])
+    assert run_main(root, build) == build_book.EXIT_NOT_EXECUTED
+    assert "notebook-timings.json does not exist" in caplog.text
+    assert "did not record the outcome of the notebooks" in caplog.text
+    assert RUN_NOTEBOOKS in caplog.text
+    assert build.calls == []
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [("{not json", "cannot be read"), ("[1, 2]", "is not a JSON object")],
+)
+def test_an_unreadable_timings_file_is_refused(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, text: str, expected: str
+) -> None:
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"])
+    (root / "build-reports" / "notebook-timings.json").write_text(text)
+    assert run_main(root, FakeBuild([])) == build_book.EXIT_NOT_EXECUTED
+    assert expected in caplog.text
+
+
+def test_a_project_without_notebooks_needs_no_timings(tmp_path: Path) -> None:
+    root = make_project(tmp_path, ["no_code"])
+    assert not (root / "build-reports").exists()
+    assert run_main(root, FakeBuild(["no_code"])) == 0
+
+
+def test_a_copy_older_than_the_helper_package_is_refused_and_names_the_file(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"])
+    helper = root / "src" / "package" / "style.py"
+    helper.parent.mkdir(parents=True)
+    helper.write_text("X = 1\n", encoding="utf-8")
+    stamp = (root / "_build" / "executed" / NOTEBOOK).stat().st_mtime + 500
+    os.utime(helper, (stamp, stamp))
+    build = FakeBuild(["notebook_smoke", "no_code"])
+    assert run_main(root, build) == build_book.EXIT_NOT_EXECUTED
+    assert "is older than src/package/style.py of the helper package" in caplog.text
+    assert RUN_NOTEBOOKS in caplog.text
+    assert build.calls == []
+
+
+def test_a_newer_bytecode_file_of_the_helper_package_is_not_a_change(
+    tmp_path: Path,
+) -> None:
+    """Importing the package writes ``__pycache__`` files; they are not sources."""
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"])
+    cached = root / "src" / "package" / "__pycache__" / "style.cpython-312.pyc"
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(b"pyc")
+    stamp = (root / "_build" / "executed" / NOTEBOOK).stat().st_mtime + 500
+    os.utime(cached, (stamp, stamp))
+    assert run_main(root, FakeBuild(["notebook_smoke", "no_code"])) == 0
+
+
+def test_a_helper_package_older_than_the_copy_is_accepted(tmp_path: Path) -> None:
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"])
+    helper = root / "src" / "package" / "style.py"
+    helper.parent.mkdir(parents=True)
+    helper.write_text("X = 1\n", encoding="utf-8")
+    stamp = (root / "_build" / "executed" / NOTEBOOK).stat().st_mtime - 500
+    os.utime(helper, (stamp, stamp))
+    assert run_main(root, FakeBuild(["notebook_smoke", "no_code"])) == 0
+
+
+# --------------------------------------------------------------------------------------
+# The staging folder and the files that cannot be read or copied
+# --------------------------------------------------------------------------------------
+
+
+def test_a_staging_folder_that_is_the_root_is_refused_before_anything_is_removed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = make_project(tmp_path, ["no_code"])
+    local_site = root / "_build" / "site" / "content"
+    local_site.mkdir(parents=True)
+    (local_site / "page.json").write_text("{}", encoding="utf-8")
+    local_html = root / "_build" / "html"
+    local_html.mkdir(parents=True)
+    build = FakeBuild(["no_code"])
+    code = build_book.main(
+        ["--root", str(root), "--executed-dir", str(root)], runner=build
+    )
+    assert code == build_book.EXIT_BAD_EXECUTED_DIR
+    assert "is the repository root" in caplog.text
+    assert str(root) in caplog.text
+    assert (local_site / "page.json").is_file()
+    assert local_html.is_dir()
+    assert build.calls == []
+
+
+def test_a_staging_folder_that_holds_the_root_is_refused(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = make_project(tmp_path, ["no_code"])
+    build = FakeBuild(["no_code"])
+    code = build_book.main(
+        ["--root", str(root), "--executed-dir", str(tmp_path)], runner=build
+    )
+    assert code == build_book.EXIT_BAD_EXECUTED_DIR
+    assert "or one of its parents" in caplog.text
+    assert build.calls == []
+    assert not (tmp_path / "myst.yml").exists()
+
+
+def test_a_missing_myst_yml_exits_with_a_named_code(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = make_project(tmp_path, ["no_code"])
+    (root / "myst.yml").unlink()
+    build = FakeBuild([])
+    assert run_main(root, build) == build_book.EXIT_FILE_ERROR
+    assert f"cannot read {root / 'myst.yml'}" in caplog.text
+    assert build.calls == []
+
+
+def test_a_myst_yml_that_is_not_yaml_exits_with_the_table_of_contents_code(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = make_project(tmp_path, ["no_code"])
+    (root / "myst.yml").write_text("project: [unclosed", encoding="utf-8")
+    assert run_main(root, FakeBuild([])) == build_book.EXIT_BAD_TOC
+    assert "is not valid YAML" in caplog.text
+
+
+def test_a_file_that_cannot_be_copied_exits_with_a_named_code(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A file where a staging folder is needed makes the copy fail with an OSError."""
+    root = make_project(tmp_path, ["no_code"])
+    executed = root / "_build" / "executed"
+    executed.mkdir(parents=True)
+    (executed / "book").write_text("in the way", encoding="utf-8")
+    build = FakeBuild(["no_code"])
+    assert run_main(root, build) == build_book.EXIT_FILE_ERROR
+    assert "cannot stage" in caplog.text
+    assert "to " + str(executed / "book" / "no_code.md") in caplog.text
+    assert build.calls == []
+
+
+# --------------------------------------------------------------------------------------
+# Staging: what pages, notebooks and myst.yml reference
+# --------------------------------------------------------------------------------------
+
+DIRECTIVE_TARGETS = {
+    "include": "parts/target.md",
+    "literalinclude": "parts/target.py",
+    "image": "parts/target.png",
+    "figure": "parts/target.png",
+    "download": "parts/target.zip",
+    "iframe": "parts/target.html",
+}
+
+
+@pytest.mark.parametrize("directive", sorted(DIRECTIVE_TARGETS))
+def test_the_file_each_directive_names_is_staged(
+    tmp_path: Path, directive: str
+) -> None:
+    target = DIRECTIVE_TARGETS[directive]
+    root = make_project(
+        tmp_path,
+        ["notebook_smoke", "no_code"],
+        {"no_code": f"# Page\n\n```{{{directive}}} {target}\n```\n"},
+    )
+    (root / "book" / "parts").mkdir()
+    (root / "book" / target).write_bytes(b"content")
+    staged = build_book.stage_book(root, root / "_build" / "executed")
+    assert (staged.stage_dir / "book" / target).read_bytes() == b"content"
+
+
+def test_the_iframe_directive_is_staged_with_the_colon_fence_too(
+    tmp_path: Path,
+) -> None:
+    root = make_project(
+        tmp_path,
+        ["notebook_smoke", "no_code"],
+        {"no_code": "# Page\n\n:::{iframe} frames/live.html\n:width: 100%\n:::\n"},
+    )
+    (root / "book" / "frames").mkdir()
+    (root / "book" / "frames" / "live.html").write_text("<p>x</p>", encoding="utf-8")
+    staged = build_book.stage_book(root, root / "_build" / "executed")
+    assert (staged.stage_dir / "book" / "frames" / "live.html").is_file()
+
+
+def test_a_root_relative_reference_is_resolved_against_the_root(
+    tmp_path: Path,
+) -> None:
+    root = make_project(
+        tmp_path,
+        ["notebook_smoke", "no_code"],
+        {"no_code": "# Page\n\n![fig](/assets/fig.png)\n"},
+    )
+    (root / "assets").mkdir()
+    (root / "assets" / "fig.png").write_bytes(b"png")
+    staged = build_book.stage_book(root, root / "_build" / "executed")
+    assert (staged.stage_dir / "assets" / "fig.png").is_file()
+
+
+def test_a_fragment_and_a_query_are_dropped_from_a_reference(tmp_path: Path) -> None:
+    text = "# Page\n\n[a](figs/a.html#section)\n\n![b](figs/b.png?raw=1)\n"
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"], {"no_code": text})
+    (root / "book" / "figs").mkdir()
+    (root / "book" / "figs" / "a.html").write_text("a", encoding="utf-8")
+    (root / "book" / "figs" / "b.png").write_bytes(b"b")
+    staged = build_book.stage_book(root, root / "_build" / "executed")
+    assert (staged.stage_dir / "book" / "figs" / "a.html").is_file()
+    assert (staged.stage_dir / "book" / "figs" / "b.png").is_file()
+
+
+def test_a_reference_outside_the_repository_is_not_staged_and_does_not_fail(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = make_project(
+        tmp_path,
+        ["notebook_smoke", "no_code"],
+        {"no_code": "# Page\n\n![out](../../outside.png)\n"},
+    )
+    (tmp_path / "outside.png").write_bytes(b"outside")
+    staged = build_book.stage_book(root, root / "_build" / "executed")
+    assert "points outside the repository" in caplog.text
+    assert not list(staged.stage_dir.rglob("outside.png"))
+
+
+def test_a_file_referenced_by_two_pages_is_staged_once(tmp_path: Path) -> None:
+    text = "# Page\n\n![fig](fig.png)\n"
+    root = make_project(
+        tmp_path,
+        ["notebook_smoke", "no_code", "plain_fence"],
+        {"no_code": text, "plain_fence": text},
+    )
+    (root / "book" / "fig.png").write_bytes(b"png")
+    staged = build_book.stage_book(root, root / "_build" / "executed")
+    assert staged.copied.count(Path("book/fig.png")) == 1
+
+
+def _notebook_with_markdown(markdown: str) -> str:
+    """Return the text of a notebook whose first cell is the given markdown."""
+    return json.dumps(
+        {
+            "cells": [
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": markdown.splitlines(True),
+                },
+                {"cell_type": "code", "metadata": {}, "source": ["![nope](code.png)"]},
+            ],
+            "metadata": {},
+            "nbformat": 4,
+            "nbformat_minor": 5,
+        }
+    )
+
+
+def test_the_files_the_markdown_cells_of_a_notebook_reference_are_staged(
+    tmp_path: Path,
+) -> None:
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"])
+    source = root / NOTEBOOK
+    source.write_text(
+        _notebook_with_markdown(
+            "A figure: ![fig](figs/n.png)\n\n```{iframe} frames/n.html\n```\n"
+        ),
+        encoding="utf-8",
+    )
+    stamp = (root / "_build" / "executed" / NOTEBOOK).stat().st_mtime - 100
+    os.utime(source, (stamp, stamp))
+    for name in ("figs/n.png", "frames/n.html", "code.png"):
+        path = root / "book" / name
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(b"x")
+    staged = build_book.stage_book(root, root / "_build" / "executed")
+    assert (staged.stage_dir / "book" / "figs" / "n.png").is_file()
+    assert (staged.stage_dir / "book" / "frames" / "n.html").is_file()
+    # Code cells are not searched, and the executed copy is not replaced by the source.
+    assert not (staged.stage_dir / "book" / "code.png").exists()
+    assert (staged.stage_dir / NOTEBOOK).read_text() == '{"executed": true}'
+
+
+def test_a_notebook_source_that_is_not_json_is_skipped_with_a_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"])
+    source = root / NOTEBOOK
+    source.write_text("not json", encoding="utf-8")
+    stamp = (root / "_build" / "executed" / NOTEBOOK).stat().st_mtime - 100
+    os.utime(source, (stamp, stamp))
+    build_book.stage_book(root, root / "_build" / "executed")
+    assert "is not a notebook file; its references are not staged" in caplog.text
+
+
+def test_the_local_files_myst_yml_names_are_staged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"])
+    document = yaml.safe_load((root / "myst.yml").read_text(encoding="utf-8"))
+    document["project"]["bibliography"] = ["refs/library.bib", "refs/absent.bib"]
+    document["project"]["title"] = "Not a file"
+    document["site"] = {"options": {"logo": "assets/logo.png"}}
+    document["project"]["thumbnail"] = "data/fresh/secret.png"
+    (root / "myst.yml").write_text(yaml.safe_dump(document), encoding="utf-8")
+    for name in ("refs/library.bib", "assets/logo.png", "data/fresh/secret.png"):
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x")
+    staged = build_book.stage_book(root, root / "_build" / "executed")
+    stage = staged.stage_dir
+    assert (stage / "refs" / "library.bib").is_file()
+    assert (stage / "assets" / "logo.png").is_file()
+    assert not (stage / "refs" / "absent.bib").exists()
+    assert not (stage / "data").exists()
+    assert "is under data/ and is not staged" in caplog.text
+
+
+def test_a_myst_yml_that_is_not_a_mapping_exits_with_the_table_of_contents_code(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = make_project(tmp_path, ["no_code"])
+    (root / "myst.yml").write_text("- a\n- list\n", encoding="utf-8")
+    assert run_main(root, FakeBuild([])) == build_book.EXIT_BAD_TOC
+    assert "is not a mapping at its top level" in caplog.text
+
+
+def test_the_references_of_a_markdown_file_named_in_myst_yml_are_followed(
+    tmp_path: Path,
+) -> None:
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"])
+    document = yaml.safe_load((root / "myst.yml").read_text(encoding="utf-8"))
+    document["project"]["abstract"] = "parts/abstract.md"
+    (root / "myst.yml").write_text(yaml.safe_dump(document), encoding="utf-8")
+    (root / "parts").mkdir()
+    (root / "parts" / "abstract.md").write_text("![x](pic.png)\n", encoding="utf-8")
+    (root / "parts" / "pic.png").write_bytes(b"png")
+    staged = build_book.stage_book(root, root / "_build" / "executed")
+    assert (staged.stage_dir / "parts" / "abstract.md").is_file()
+    assert (staged.stage_dir / "parts" / "pic.png").is_file()
+
+
+def test_the_script_exits_with_the_code_of_a_refused_staging_folder(
+    tmp_path: Path,
+) -> None:
+    """The ``__main__`` entry point returns the staging-folder code to the shell."""
+    root = make_project(tmp_path, ["no_code"])
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--root", str(root), "--executed-dir", str(root)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == build_book.EXIT_BAD_EXECUTED_DIR
+    assert "is the repository root" in result.stderr
