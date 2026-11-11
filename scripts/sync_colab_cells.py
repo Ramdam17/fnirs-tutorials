@@ -1,9 +1,10 @@
-"""Write the Colab badge, the setup cell and the runtime request into every notebook.
+"""Write the Colab link, the setup cell and the runtime request into every notebook.
 
 Three things are written into each notebook of the table of contents of ``myst.yml``:
 
-* a badge, one line of the first markdown cell, right after its title line, that opens
-  the notebook on Colab from GitHub at a given ref;
+* a link, one line of text in the first markdown cell, with a blank line on each side and
+  placed after its title line, that opens the notebook on Colab from GitHub at a given
+  ref (no image, so that building the book needs no remote file);
 * the setup cell, the first code cell, rendered from ``book/_templates/colab_setup.py``;
 * the request for the Colab runtime version of ``config/colab.yaml``, in the metadata
   key ``colab.runtime_attributes.runtime_version`` that Colab itself writes.
@@ -21,10 +22,11 @@ first one is how this script finds the cell again, so a rerun replaces it and ne
 a second.
 
 The ref of a notebook is the one the notebook already carries (read from its setup cell,
-then from its badge), or the default ref of the configuration for a notebook that
-carries none; ``--ref`` overrides both. A committed file cannot name its own commit, so
-the committed notebooks carry ``main`` and the workflow runs ``--ref "$GITHUB_SHA"``
-before it builds.
+then from its link), or the default ref of the configuration for a notebook that carries
+none; ``--ref`` overrides both. The link and the setup cell always name the same ref. The
+committed notebooks carry ``main``, so a reader on Colab gets the latest notebook with
+the latest package; a numbered release writes its tag into both with ``--ref``. The
+script also recognises, and replaces, the badge image line an earlier version wrote.
 
 The line that the cell prints to report its duration starts with the prefix
 ``Setup time in seconds:``, followed by ``install``, ``download`` and ``total`` values.
@@ -32,7 +34,8 @@ The line that the cell prints to report its duration starts with the prefix
 When to use
 -----------
 Run it after editing the template, ``config/colab.yaml`` or the overrides of
-``pyproject.toml``, and with ``--check`` in the workflow and before a commit.
+``pyproject.toml``, and with ``--check`` in the workflow and before a commit; for a release, with
+``--ref <tag>`` before the tag is made.
 
 Examples
 --------
@@ -69,8 +72,7 @@ SETUP_TAG = "colab-setup"
 HIDE_TAG = "hide-input"
 SETUP_TAGS = [SETUP_TAG, HIDE_TAG]
 SETUP_CELL_ID = "colab-setup"
-BADGE_PREFIX = "[![Open In Colab]("
-BADGE_IMAGE = "https://colab.research.google.com/assets/colab-badge.svg"
+LINK_TEXT = "Open this notebook in Google Colab"
 COLAB_GITHUB_URL = "https://colab.research.google.com/github"
 
 BLOCK_BEGIN = "# --- values written by scripts/sync_colab_cells.py (begin) ---"
@@ -111,7 +113,7 @@ def validate_ref(ref: str) -> str:
     Parameters
     ----------
     ref : str
-        A git ref written into the badge URL and into the setup cell.
+        A git ref written into the link and into the setup cell.
 
     Returns
     -------
@@ -262,15 +264,29 @@ def render_cell(template: str, config: Config, ref: str, overrides: list[str]) -
     return "\n".join(rendered).rstrip("\n")
 
 
-def badge_line(config: Config, ref: str, notebook: str) -> str:
-    """Return the badge line that opens ``notebook`` on Colab at ``ref``."""
+def link_line(config: Config, ref: str, notebook: str) -> str:
+    """Return the line of text that opens ``notebook`` on Colab at ``ref``."""
     validate_ref(ref)
     if not NOTEBOOK_PATH_PATTERN.fullmatch(notebook):
         raise SyncError(
             f"The notebook path {notebook!r} holds an unexpected character."
         )
     url = f"{COLAB_GITHUB_URL}/{config.repository}/blob/{ref}/{notebook}"
-    return f"{BADGE_PREFIX}{BADGE_IMAGE})]({url})"
+    return f"[{LINK_TEXT}]({url})"
+
+
+def _is_link_line(line: str, config: Config) -> bool:
+    """Tell whether a line is a Colab link of this repository, text or image badge.
+
+    The test is on the target of the link, so the badge image line written by an earlier
+    version is recognised as well and replaced.
+    """
+    text = line.rstrip("\n")
+    return (
+        text.startswith("[")
+        and text.endswith(")")
+        and f"]({COLAB_GITHUB_URL}/{config.repository}/blob/" in text
+    )
 
 
 def _to_lines(text: str) -> list[str]:
@@ -318,7 +334,7 @@ def _title_index(lines: list[str]) -> int | None:
 def carried_ref(nb: dict[str, Any], notebook: str, config: Config) -> str | None:
     """Return the ref a notebook already carries, or None.
 
-    The setup cell is read first, then the badge. The value is returned as written,
+    The setup cell is read first, then the link. The value is returned as written,
     without validation.
     """
     for cell in nb.get("cells", []):
@@ -336,7 +352,7 @@ def carried_ref(nb: dict[str, Any], notebook: str, config: Config) -> str | None
             + r"\)$"
         )
         for line in _source_lines(first):
-            if line.startswith(BADGE_PREFIX):
+            if _is_link_line(line, config):
                 match = pattern.search(line.rstrip("\n"))
                 if match:
                     return match.group("ref")
@@ -351,13 +367,21 @@ def dump_notebook(nb: dict[str, Any]) -> str:
 def load_notebook(path: Path) -> tuple[dict[str, Any], bool]:
     """Read a notebook; also say whether the file is laid out the way ``dump_notebook`` writes.
 
+    Raises
+    ------
+    SyncError
+        If the file is missing, unreadable, not valid JSON or not a notebook.
+
     Returns
     -------
     tuple of (dict, bool)
         The notebook, and True if dumping it again gives the file byte for byte.
     """
-    text = path.read_text(encoding="utf-8")
-    nb = json.loads(text)
+    try:
+        text = path.read_text(encoding="utf-8")
+        nb = json.loads(text)
+    except (OSError, ValueError) as error:
+        raise SyncError(f"{path}: cannot be read as a notebook: {error}") from error
     if not isinstance(nb, dict) or not isinstance(nb.get("cells"), list):
         raise SyncError(f"{path}: not a notebook (no list of cells).")
     return nb, dump_notebook(nb) == text
@@ -371,7 +395,7 @@ def sync_notebook(
     template: str,
     overrides: list[str],
 ) -> dict[str, Any]:
-    """Return a copy of ``nb`` with the badge, the setup cell and the runtime request.
+    """Return a copy of ``nb`` with the link, the setup cell and the runtime request.
 
     Parameters
     ----------
@@ -380,7 +404,7 @@ def sync_notebook(
     notebook : str
         Path of the notebook from the repository root, in POSIX form.
     ref : str
-        Git ref written into the badge and the cell.
+        Git ref written into the link and the cell.
     config : Config
         Values of ``config/colab.yaml``.
     template : str
@@ -406,23 +430,26 @@ def sync_notebook(
     result = dict(nb)
     cells = list(nb["cells"])
 
-    # Badge: removed wherever it is in the first markdown cell, then written once, right
-    # after the title line.
+    # Link: every link line is removed from the first markdown cell, and one is written
+    # after the title line with a blank line on each side. The blank lines that followed
+    # the title are dropped first, so that a cell that already holds the link, or none,
+    # comes out the same.
     first = _first_markdown({"cells": cells})
     if first is None:
-        raise SyncError(f"{notebook}: no markdown cell to hold the badge.")
-    lines = [line for line in _source_lines(first) if not line.startswith(BADGE_PREFIX)]
+        raise SyncError(f"{notebook}: no markdown cell to hold the link.")
+    lines = _source_lines(first)
     title = _title_index(lines)
     if title is None:
         raise SyncError(f"{notebook}: the first markdown cell has no title line.")
-    badge = badge_line(config, ref, notebook)
-    if lines[title].endswith("\n"):
-        lines.insert(title + 1, badge + "\n")
-    else:
-        lines[title] += "\n"
-        lines.append(badge)
+    before = lines[:title] + [lines[title].rstrip("\n") + "\n"]
+    after = [line for line in lines[title + 1 :] if not _is_link_line(line, config)]
+    while after and not after[0].strip():
+        after.pop(0)
+    link = link_line(config, ref, notebook)
+    # The last line of a notebook source has no newline.
+    link_lines = ["\n", link + "\n", "\n"] if after else ["\n", link]
     new_first = dict(first)
-    new_first["source"] = lines
+    new_first["source"] = before + link_lines + after
     cells[cells.index(first)] = new_first
 
     # Setup cell: the tagged cells are replaced by one, placed as the first code cell.
@@ -503,24 +530,27 @@ def check_notebook(
     problems: list[str] = []
     cells = nb["cells"]
 
-    # Badge.
+    # Link.
     first = _first_markdown(nb)
-    badges = [
+    links = [
         line.rstrip("\n")
         for line in (_source_lines(first) if first is not None else [])
-        if line.startswith(BADGE_PREFIX)
+        if _is_link_line(line, config)
     ]
-    wanted = badge_line(config, ref, notebook)
-    if not badges:
-        problems.append("the Colab badge is missing")
-    elif len(badges) > 1:
-        problems.append(f"{len(badges)} Colab badges are present, one is expected")
-    elif badges[0] != wanted:
+    wanted = link_line(config, ref, notebook)
+    if not links:
+        problems.append("the Colab link is missing")
+    elif len(links) > 1:
+        problems.append(f"{len(links)} Colab links are present, one is expected")
+    elif links[0] != wanted:
         problems.append(
-            f"the Colab badge differs: expected {wanted!r}, found {badges[0]!r}"
+            f"the Colab link differs (a different ref than the setup cell, an image "
+            f"badge, or another notebook): expected {wanted!r}, found {links[0]!r}"
         )
     elif _source_lines(first) != _source_lines(_first_markdown(expected)):
-        problems.append("the Colab badge is not right after the title line")
+        problems.append(
+            "the Colab link is not placed after the title line with a blank line on each side"
+        )
 
     # Setup cell.
     tagged = [cell for cell in cells if _is_setup_cell(cell)]
@@ -589,7 +619,7 @@ def _load_toc_reader() -> Any:
 
 def _parse_arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Write the Colab badge, setup cell and runtime request into the notebooks."
+        description="Write the Colab link, setup cell and runtime request into the notebooks."
     )
     parser.add_argument(
         "--ref",

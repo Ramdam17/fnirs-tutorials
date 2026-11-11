@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import difflib
+import importlib.metadata as importlib_metadata
 import importlib.util
 import json
 import logging
@@ -71,28 +72,31 @@ def test_template_ships_the_values_it_would_be_rendered_with() -> None:
 
 
 @pytest.mark.parametrize("notebook", BOOK_NOTEBOOKS)
-def test_book_notebook_has_badge_cell_and_runtime_request(notebook: str) -> None:
+def test_book_notebook_has_link_cell_and_runtime_request(notebook: str) -> None:
     nb = json.loads((REPO_ROOT / notebook).read_text(encoding="utf-8"))
     cells = nb["cells"]
 
     first_markdown = next(c for c in cells if c["cell_type"] == "markdown")
-    badge = re.compile(
-        re.escape(f"[![Open In Colab]({sync.BADGE_IMAGE})]")
-        + re.escape(
-            f"(https://colab.research.google.com/github/{CONFIG.repository}/blob/"
-        )
+    link = re.compile(
+        re.escape(f"[{sync.LINK_TEXT}](https://colab.research.google.com/github/")
+        + re.escape(f"{CONFIG.repository}/blob/")
         + r"(?P<ref>.+)/"
         + re.escape(notebook)
         + r"\)"
     )
-    badges = [
-        m
-        for line in first_markdown["source"]
-        if (m := badge.fullmatch(line.rstrip("\n")))
-    ]
-    assert len(badges) == 1
-    ref = badges[0].group("ref")
+    lines = [line.rstrip("\n") for line in first_markdown["source"]]
+    links = [m for line in lines if (m := link.fullmatch(line))]
+    assert len(links) == 1
+    ref = links[0].group("ref")
     sync.validate_ref(ref)
+    # One blank line on each side of the link, after the title line.
+    position = lines.index(links[0].group(0))
+    assert lines[position - 2].startswith("# ")
+    assert lines[position - 1] == "" and lines[position + 1] == ""
+    # No remote image, which would make the build of the book depend on another host.
+    text = "\n".join(lines)
+    assert not re.search(r"!\[[^\]]*\]\(\s*(https?:)?//", text)
+    assert not re.search(r"<img[^>]+src=[\"']?(https?:)?//", text)
 
     first_code = next(c for c in cells if c["cell_type"] == "code")
     assert "".join(first_code["source"]) == _render(ref)
@@ -123,6 +127,28 @@ def _fresh_namespace() -> dict[str, Any]:
     return namespace
 
 
+STAND_IN_NAMES = (
+    "_SETUP_DIR",
+    "_DATA_DIR",
+    "_CACHE_DIR",
+    "_running_python",
+    "_shutil",
+    "_kernel_has_old_numpy",
+    "_time",
+    "_check_installed",
+    "_run",
+    "_fetch",
+    "_kill_kernel",
+    "_subprocess",
+    "_request",
+    "_os",
+)
+
+
+def _forbidden(*args: object, **kwargs: object) -> None:
+    pytest.fail("the cell reached a real process, connection or kill")
+
+
 class Cell:
     """The rendered cell executed in a namespace, with stand-ins for its side effects."""
 
@@ -134,6 +160,17 @@ class Cell:
         self.calls: list[tuple[Any, ...]] = []
         self.setup_dir = tmp_path / "setup"
         self.ns = _fresh_namespace()
+        for name in STAND_IN_NAMES:
+            assert name in self.ns, f"the cell has no {name}"
+        # Under every stand-in, the real process module, the real urlopen and the real
+        # os.kill fail the test if anything reaches them.
+        self.ns["_subprocess"] = SimpleNamespace(
+            Popen=_forbidden, PIPE=-1, STDOUT=-2, run=_forbidden
+        )
+        self.ns["_request"] = SimpleNamespace(urlopen=_forbidden)
+        self.ns["_os"] = SimpleNamespace(
+            environ=os.environ, getpid=os.getpid, kill=_forbidden
+        )
         self.ns["_SETUP_DIR"] = str(self.setup_dir)
         self.ns["_DATA_DIR"] = str(tmp_path / "data")
         self.ns["_CACHE_DIR"] = str(tmp_path / "cache")
@@ -145,6 +182,7 @@ class Cell:
             sleep=lambda seconds: self.calls.append(("sleep", seconds)),
             monotonic=lambda: next(clock),
         )
+        self.ns["_check_installed"] = self._check
         self.ns["_run"] = self._run
         self.ns["_fetch"] = self._fetch
         self.ns["_kill_kernel"] = self._kill
@@ -165,6 +203,11 @@ class Cell:
         if self.fail_on == "fetch":
             raise RuntimeError("stand-in failure of fetch")
         destination.write_text("# stand-in", encoding="utf-8")
+
+    def _check(self) -> None:
+        self.calls.append(("check",))
+        if self.fail_on == "check":
+            raise RuntimeError("stand-in failure of check")
 
     def _kill(self) -> None:
         self.calls.append(("kill", self.marker.exists()))
@@ -232,8 +275,8 @@ def test_fresh_setup_runs_every_step_in_order(
 ) -> None:
     cell.setup()
 
-    assert cell.kinds() == ["install", "fetch", "download", "sleep", "kill"]
-    install, fetch, download, sleep, kill = cell.calls
+    assert cell.kinds() == ["install", "fetch", "download", "check", "sleep", "kill"]
+    install, fetch, download, _check, sleep, kill = cell.calls
     overrides_file = cell.setup_dir / "overrides.txt"
     assert install[1] == [
         "uv",
@@ -280,13 +323,21 @@ def test_fresh_setup_runs_every_step_in_order(
     assert "!" not in printed
 
 
-@pytest.mark.parametrize("step", ["install", "fetch", "download"])
+@pytest.mark.parametrize("step", ["install", "fetch", "download", "check"])
 def test_a_failed_step_leaves_no_marker_and_ends_no_kernel(
     cell: Cell, step: str
 ) -> None:
     cell.fail_on = step
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError) as error:
         cell.setup()
+    message = str(error.value)
+    assert f"stand-in failure of {step}" in message
+    assert message.endswith(cell.ns["_ADVICE"])
+    for phrase in ("Run this cell again", "Disconnect and delete runtime", "report"):
+        assert phrase in message
+    assert isinstance(error.value.__cause__, RuntimeError), (
+        "the original error is chained"
+    )
     assert "kill" not in cell.kinds() and "sleep" not in cell.kinds()
     assert not cell.marker.exists()
 
@@ -373,16 +424,81 @@ def test_the_kernel_is_ended_with_signal_nine(cell: Cell) -> None:
     assert sent == [(4242, 9)]
 
 
-def test_command_output_is_shown_line_by_line_and_failures_raise(
-    cell: Cell, capsys: pytest.CaptureFixture[str]
+def _real_run() -> Any:
+    return _fresh_namespace()["_run"]
+
+
+def test_run_prints_every_line_in_order(capsys: pytest.CaptureFixture[str]) -> None:
+    code = "import sys; [print('line', i, flush=True) for i in range(5)]; print('err', file=sys.stderr)"
+    _real_run()([sys.executable, "-c", code])
+    out = capsys.readouterr().out.splitlines()
+    assert out[0].startswith("$ ")
+    assert out[1:6] == [f"line {i}" for i in range(5)]
+    assert out[6] == "err"
+
+
+def test_run_raises_with_the_command_and_the_exit_code(
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    fresh = _fresh_namespace()
-    code = "import sys; print('one'); print('two', file=sys.stderr); sys.exit(3)"
+    command = [sys.executable, "-c", "import sys; print('one'); sys.exit(3)"]
     with pytest.raises(RuntimeError) as error:
-        fresh["_run"]([sys.executable, "-c", code])
-    out = capsys.readouterr().out
-    assert "one\n" in out and "two\n" in out
-    assert "exit code 3" in str(error.value) and "-c" in str(error.value)
+        _real_run()(command)
+    assert "exit code 3" in str(error.value) and "sys.exit(3)" in str(error.value)
+    assert "one\n" in capsys.readouterr().out
+
+
+def test_an_interruption_while_reading_leaves_no_live_child(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    namespace = _fresh_namespace()
+    started: list[subprocess.Popen[str]] = []
+
+    def record(*args: Any, **kwargs: Any) -> subprocess.Popen[str]:
+        process = subprocess.Popen(*args, **kwargs)
+        started.append(process)
+        return process
+
+    namespace["_subprocess"] = SimpleNamespace(
+        Popen=record, PIPE=subprocess.PIPE, STDOUT=subprocess.STDOUT
+    )
+    printed: list[str] = []
+
+    def interrupting_print(*args: Any, **kwargs: Any) -> None:
+        printed.append(" ".join(str(a) for a in args))
+        if len(printed) == 2:  # the echo of the command, then the first line of output
+            raise KeyboardInterrupt
+
+    namespace["print"] = interrupting_print
+    child = "import time; print('started', flush=True); time.sleep(60)"
+    with pytest.raises(KeyboardInterrupt):
+        namespace["_run"]([sys.executable, "-c", child])
+    assert len(started) == 1
+    assert started[0].poll() is not None, "the child was killed and waited for"
+    assert started[0].stdout is not None and started[0].stdout.closed
+
+
+def test_the_check_of_the_install_looks_for_the_package() -> None:
+    namespace = _fresh_namespace()
+    invalidated: list[bool] = []
+    namespace["_importlib"] = SimpleNamespace(
+        invalidate_caches=lambda: invalidated.append(True)
+    )
+    versions: dict[str, str] = {"fnirs-tutorials": "0.1.0"}
+
+    def version(name: str) -> str:
+        try:
+            return versions[name]
+        except KeyError:
+            raise importlib_metadata.PackageNotFoundError(name) from None
+
+    namespace["_metadata"] = SimpleNamespace(
+        version=version, PackageNotFoundError=importlib_metadata.PackageNotFoundError
+    )
+    namespace["_check_installed"]()
+    assert invalidated == [True]
+    versions.clear()
+    with pytest.raises(RuntimeError, match="fnirs-tutorials"):
+        namespace["_check_installed"]()
 
 
 def test_fetch_writes_the_bytes_of_the_response(cell: Cell, tmp_path: Path) -> None:
@@ -412,7 +528,10 @@ def test_fetch_writes_the_bytes_of_the_response(cell: Cell, tmp_path: Path) -> N
 # ---------------------------------------------------------------------------
 
 
-def _notebook() -> dict[str, Any]:
+FIRST_SOURCE = "# Cédalion title\n\nSome text."
+
+
+def _notebook(first_source: str = FIRST_SOURCE) -> dict[str, Any]:
     def cell(kind: str, cell_id: str, source: str, **extra: Any) -> dict[str, Any]:
         result: dict[str, Any] = {
             "cell_type": kind,
@@ -427,7 +546,7 @@ def _notebook() -> dict[str, Any]:
 
     return {
         "cells": [
-            cell("markdown", "aaaa0001", "# Cédalion title\n\nSome text."),
+            cell("markdown", "aaaa0001", first_source),
             cell("markdown", "aaaa0002", "## Hands-on"),
             cell(
                 "code",
@@ -454,7 +573,7 @@ def _notebook() -> dict[str, Any]:
 NOTEBOOK_PATHS = ["book/a.ipynb", "book/sub/b.ipynb"]
 
 
-def _make_project(root: Path) -> Path:
+def _make_project(root: Path, first_source: str = FIRST_SOURCE) -> Path:
     (root / "config").mkdir(parents=True)
     shutil.copy(REPO_ROOT / "config" / "colab.yaml", root / "config" / "colab.yaml")
     shutil.copy(REPO_ROOT / "pyproject.toml", root / "pyproject.toml")
@@ -466,7 +585,9 @@ def _make_project(root: Path) -> Path:
     )
     for path in NOTEBOOK_PATHS:
         (root / path).parent.mkdir(parents=True, exist_ok=True)
-        (root / path).write_text(sync.dump_notebook(_notebook()), encoding="utf-8")
+        (root / path).write_text(
+            sync.dump_notebook(_notebook(first_source)), encoding="utf-8"
+        )
     return root
 
 
@@ -487,17 +608,17 @@ def _snapshot(root: Path) -> dict[str, bytes]:
     return {p: (root / p).read_bytes() for p in NOTEBOOK_PATHS}
 
 
-def test_sync_writes_badge_cell_and_runtime_request(project: Path) -> None:
+def test_sync_writes_link_cell_and_runtime_request(project: Path) -> None:
     assert sync.main(["--root", str(project), "--ref", "abc1234"]) == 0
     nb = _read(project, "book/a.ipynb")
 
     first = "".join(nb["cells"][0]["source"])
-    badge = (
-        f"[![Open In Colab]({sync.BADGE_IMAGE})]"
-        f"(https://colab.research.google.com/github/{CONFIG.repository}"
-        "/blob/abc1234/book/a.ipynb)"
+    link = (
+        "[Open this notebook in Google Colab](https://colab.research.google.com/github/"
+        f"{CONFIG.repository}/blob/abc1234/book/a.ipynb)"
     )
-    assert first.split("\n")[:2] == ["# Cédalion title", badge]
+    assert first == f"# Cédalion title\n\n{link}\n\nSome text."
+    assert "![" not in first
     setup = nb["cells"][2]
     assert setup["cell_type"] == "code" and setup["id"] == "colab-setup"
     assert setup["metadata"] == {"tags": ["colab-setup", "hide-input"]}
@@ -550,20 +671,86 @@ def test_ref_a_then_ref_b_equals_ref_b_alone(tmp_path: Path) -> None:
     assert _snapshot(first) == _snapshot(second)
 
 
-def test_one_badge_and_one_cell_even_after_hand_additions(project: Path) -> None:
+def test_one_link_and_one_cell_even_after_hand_additions(project: Path) -> None:
     sync.main(["--root", str(project)])
     nb = _read(project, "book/a.ipynb")
-    nb["cells"][0]["source"].insert(2, nb["cells"][0]["source"][1])
+    source = nb["cells"][0]["source"]
+    source[2:2] = [source[2], "\n"]
     _write(project, "book/a.ipynb", nb)
     sync.main(["--root", str(project)])
     nb = _read(project, "book/a.ipynb")
-    badges = [
-        line
-        for line in nb["cells"][0]["source"]
-        if line.startswith("[![Open In Colab]")
-    ]
+    links = [line for line in nb["cells"][0]["source"] if line.startswith("[Open this")]
     tagged = [c for c in nb["cells"] if "colab-setup" in c["metadata"].get("tags", [])]
-    assert len(badges) == 1 and len(tagged) == 1
+    assert len(links) == 1 and len(tagged) == 1
+
+
+OLD_BADGE = (
+    "[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)]"
+    f"(https://colab.research.google.com/github/{CONFIG.repository}"
+    "/blob/main/book/a.ipynb)"
+)
+LINK_MAIN = (
+    "[Open this notebook in Google Colab](https://colab.research.google.com/github/"
+    f"{CONFIG.repository}/blob/main/book/a.ipynb)"
+)
+
+
+@pytest.mark.parametrize(
+    "first_source",
+    [
+        "# T",
+        "# T\n",
+        "# T\nText",
+        "# T\n\nText",
+        "# T\n\n\nText",
+        f"# T\n\n{LINK_MAIN}\n\nText",
+        f"# T\n\n{LINK_MAIN}",
+        f"# T\n{OLD_BADGE}\n\nText",
+        f"# T\n{OLD_BADGE}",
+        f"Intro line\n# T\n\nText\n{LINK_MAIN}\nMore",
+    ],
+    ids=[
+        "title-alone-no-newline",
+        "title-alone-newline",
+        "title-then-text",
+        "title-blank-text",
+        "title-two-blanks-text",
+        "already-linked",
+        "already-linked-alone",
+        "old-badge",
+        "old-badge-alone",
+        "text-before-and-stray-link",
+    ],
+)
+def test_every_shape_of_the_first_cell_is_written_once_and_stays(
+    tmp_path: Path, first_source: str
+) -> None:
+    root = _make_project(tmp_path / "project", first_source)
+    assert sync.main(["--root", str(root)]) == 0
+    once = _snapshot(root)
+    assert sync.main(["--root", str(root), "--check"]) == 0
+    assert sync.main(["--root", str(root)]) == 0
+    assert _snapshot(root) == once
+
+    text = "".join(_read(root, "book/a.ipynb")["cells"][0]["source"])
+    assert text.count("colab.research.google.com") == 1
+    assert "![" not in text and "colab-badge" not in text
+    lines = text.split("\n")
+    position = next(i for i, line in enumerate(lines) if line.startswith("[Open this"))
+    assert lines[position - 1] == "" and (
+        position + 1 == len(lines) or lines[position + 1] == ""
+    )
+    assert "# T" in lines
+    assert ("Text" in first_source) == ("Text" in lines)
+
+
+def test_the_badge_image_of_an_earlier_version_is_replaced_by_the_text_link(
+    tmp_path: Path,
+) -> None:
+    root = _make_project(tmp_path / "project", f"# T\n{OLD_BADGE}\n\nText")
+    sync.main(["--root", str(root)])
+    text = "".join(_read(root, "book/a.ipynb")["cells"][0]["source"])
+    assert text == f"# T\n\n{LINK_MAIN}\n\nText"
 
 
 def test_the_layout_is_kept_outside_the_lines_the_script_owns(project: Path) -> None:
@@ -639,15 +826,27 @@ def test_check_passes_after_a_sync_and_writes_nothing(project: Path) -> None:
     assert _snapshot(project) == before
 
 
-def _drop_badge(nb: dict[str, Any]) -> None:
+def _drop_link(nb: dict[str, Any]) -> None:
     nb["cells"][0]["source"] = [
-        line for line in nb["cells"][0]["source"] if not line.startswith("[![")
+        line for line in nb["cells"][0]["source"] if not line.startswith("[Open this")
     ]
 
 
-def _badge_other_ref(nb: dict[str, Any]) -> None:
+def _link_other_ref(nb: dict[str, Any]) -> None:
     lines = nb["cells"][0]["source"]
-    lines[1] = lines[1].replace("/blob/abc1234/", "/blob/zzz9999/")
+    lines[2] = lines[2].replace("/blob/abc1234/", "/blob/zzz9999/")
+
+
+def _link_squeezed(nb: dict[str, Any]) -> None:
+    del nb["cells"][0]["source"][3]
+
+
+def _badge_image(nb: dict[str, Any]) -> None:
+    lines = nb["cells"][0]["source"]
+    target = lines[2][lines[2].index("](") + 1 :].rstrip("\n")
+    lines[2] = (
+        f"[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)]{target}\n"
+    )
 
 
 def _edit_cell(nb: dict[str, Any]) -> None:
@@ -683,8 +882,10 @@ def _cell_shown(nb: dict[str, Any]) -> None:
 @pytest.mark.parametrize(
     ("mutate", "expected"),
     [
-        (_drop_badge, "badge is missing"),
-        (_badge_other_ref, "badge differs"),
+        (_drop_link, "link is missing"),
+        (_link_other_ref, "link differs"),
+        (_badge_image, "link differs"),
+        (_link_squeezed, "blank line on each side"),
         (_edit_cell, "setup cell differs"),
         (_cell_not_first, "not the first code cell"),
         (_two_cells, "2 cells carry the tag"),
@@ -724,3 +925,30 @@ def test_check_fails_when_the_overrides_of_pyproject_changed(
     # Writing again brings the notebooks back in line.
     assert sync.main(["--root", str(project)]) == 0
     assert sync.main(["--root", str(project), "--check"]) == 0
+
+
+def test_a_missing_notebook_is_refused_input(project: Path) -> None:
+    missing = project / "book/sub/b.ipynb"
+    missing.unlink()
+    with pytest.raises(sync.SyncError):
+        sync.load_notebook(missing)
+    # The reader of the table of contents refuses a listed notebook that is absent.
+    assert sync.main(["--root", str(project), "--check"]) == 2
+
+
+def test_an_unreadable_notebook_is_refused_input(project: Path) -> None:
+    path = project / "book/a.ipynb"
+    path.write_bytes(b"\xff\xfe not utf-8")
+    with pytest.raises(sync.SyncError):
+        sync.load_notebook(path)
+    assert sync.main(["--root", str(project), "--check"]) == 2
+    assert sync.main(["--root", str(project)]) == 2
+
+
+def test_a_notebook_that_is_not_json_is_refused_input(project: Path) -> None:
+    path = project / "book/a.ipynb"
+    path.write_text("{not json", encoding="utf-8")
+    with pytest.raises(sync.SyncError):
+        sync.load_notebook(path)
+    assert sync.main(["--root", str(project), "--check"]) == 2
+    assert sync.main(["--root", str(project)]) == 2

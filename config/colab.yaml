@@ -1,13 +1,15 @@
 # Parameters of the Google Colab path of the book. They are read by
-# scripts/sync_colab_cells.py, which writes the badge, the setup cell and the runtime
+# scripts/sync_colab_cells.py, which writes the Colab link, the setup cell and the runtime
 # request into every notebook, and by tests/test_colab_cells.py.
 
 # GitHub repository that holds the book, as <owner>/<name>. It is the one `main` is
-# pushed to; the badge, the install and the download all name it.
+# pushed to; the link, the install and the download all name it.
 repository: Ramdam17/fnirs-tutorials
 
-# Ref (branch, tag or commit) written into a notebook that carries none. The committed
-# notebooks carry `main`; the workflow rewrites it to the commit that built the page.
+# Ref (branch, tag or commit) written into a notebook that carries none. The Colab link
+# and the setup cell of a notebook name the same ref: the committed notebooks carry
+# `main`, so a reader on Colab gets the latest notebook with the latest package. A
+# numbered release writes its tag into both with `--ref`.
 default_ref: main
 
 # Colab runtime version every notebook asks for, as a string. Measured on 2026-11-11: the
