@@ -1,0 +1,141 @@
+# Build, execute and deploy the book (sprint S01, Task 5).
+#
+# The notebooks are executed headless by pytest (tests/test_notebooks.py), which writes
+# the executed copies under _build/executed/. scripts/build_book.py then builds the site
+# from those copies, without --execute, and checks the pages MyST built. The site is
+# deployed to GitHub Pages only from main.
+#
+# Every action is pinned to the full version that `gh api repos/<owner>/<action>/releases/latest`
+# returned on 2026-11-11, and the inputs used below were read in the action.yml of that
+# version. astral-sh/setup-uv publishes no moving major tag, so the full version is used
+# for every action, for one rule.
+
+name: Book
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # The site is served from a sub-folder of the account's Pages domain, so MyST needs the
+  # base URL at build time. MyST reads the environment variable BASE_URL, whose value is
+  # the path of the site, here "/<repository name>". Source: "Deploy to GitHub Pages" at
+  # https://mystmd.org/guide/deployment-github-pages, which the Jupyter Book 2 page
+  # https://jupyterbook.org/stable/build-and-publish/publish links to for the GitHub Pages
+  # configuration. scripts/build_book.py does not set it; its child process inherits it.
+  BASE_URL: /${{ github.event.repository.name }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Print the hardware of the runner
+        run: |
+          echo "nproc: $(nproc)"
+          free -m
+          df -h /
+          cat /etc/os-release
+          echo "ImageOS=${ImageOS:-unset} ImageVersion=${ImageVersion:-unset}"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+
+      # Node.js 26 is the major version the site was validated with on the Mac
+      # (node --version printed v26.12.0, recorded in COMPAT.md). Jupyter Book 2 runs the
+      # MyST engine on Node.js.
+      - name: Set up Node.js
+        uses: actions/setup-node@v7.1.0
+        with:
+          node-version: "26"
+
+      # The FRESH archives are fetched from OSF by scripts/download_data.py. The key changes
+      # only when that script does, since the archives, their sizes and their checksums are
+      # written in it (Decision 3 of the sprint plan).
+      - name: Restore the FRESH data
+        id: fresh-cache
+        uses: actions/cache@v6.1.0
+        with:
+          path: data/fresh
+          key: fresh-${{ hashFiles('scripts/download_data.py') }}
+
+      - name: Report the FRESH cache
+        run: echo "FRESH cache hit - ${{ steps.fresh-cache.outputs.cache-hit }}"
+
+      - name: Install the environment
+        run: uv sync --locked
+
+      - name: Download the FRESH data
+        run: uv run python scripts/download_data.py --data-dir data
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Check the format
+        run: uv run ruff format --check .
+
+      # The notebooks are executed once, by the next step, so this step leaves them out.
+      - name: Test (no notebook of the book)
+        run: uv run python -m pytest --ignore tests/test_notebooks.py
+
+      - name: Execute the notebooks
+        id: notebooks
+        run: uv run python -m pytest tests/test_notebooks.py -v
+
+      # The timings file is written by the notebook step, a failed notebook included; it
+      # does not exist when an earlier step failed, so the upload is skipped then.
+      - name: Upload the notebook timings
+        if: ${{ !cancelled() && steps.notebooks.conclusion != 'skipped' }}
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: notebook-timings
+          path: build-reports/notebook-timings.json
+          if-no-files-found: error
+
+      - name: Build the book from the executed notebooks
+        run: uv run python scripts/build_book.py
+
+      # Only main deploys; Pages must be enabled in the repository settings for this step.
+      - name: Configure Pages
+        if: github.ref == 'refs/heads/main'
+        uses: actions/configure-pages@v6.0.0
+
+      # The Pages artifact holds the HTML of the staging folder and nothing else: the
+      # staging folder holds myst.yml, the pages and the executed notebooks, never data/.
+      - name: List what the Pages artifact holds
+        run: |
+          find _build/executed/_build/html -type f | sort
+          du -sh _build/executed/_build/html
+
+      - name: Upload the Pages artifact
+        uses: actions/upload-pages-artifact@v5.0.0
+        with:
+          path: _build/executed/_build/html
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    # One deployment at a time; a running deployment is not cancelled.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5.0.1
