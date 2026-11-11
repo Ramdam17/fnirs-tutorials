@@ -25,7 +25,9 @@ The ref of a notebook is the one the notebook already carries (read from its set
 then from its link), or the default ref of the configuration for a notebook that carries
 none; ``--ref`` overrides both. The link and the setup cell always name the same ref. The
 committed notebooks carry ``main``, so a reader on Colab gets the latest notebook with
-the latest package; a numbered release writes its tag into both with ``--ref``. The
+the latest package; a numbered release writes its tag into both with ``--ref``. A ref is
+one path segment and never holds a slash: a branch whose name holds one is named by its
+commit hash. The
 script also recognises, and replaces, the badge image line an earlier version wrote.
 
 The line that the cell prints to report its duration starts with the prefix
@@ -78,8 +80,9 @@ COLAB_GITHUB_URL = "https://colab.research.google.com/github"
 BLOCK_BEGIN = "# --- values written by scripts/sync_colab_cells.py (begin) ---"
 BLOCK_END = "# --- values written by scripts/sync_colab_cells.py (end) ---"
 
-# Characters of a branch, a tag or a commit; the ref is written into code and into a URL.
-REF_PATTERN = re.compile(r"[A-Za-z0-9._/-]+")
+# Characters of a tag, a commit or a branch name without a slash; the ref is written into
+# code and into a URL as one path segment, so it never holds a slash.
+REF_PATTERN = re.compile(r"[A-Za-z0-9._-]+")
 REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 PYTHON_VERSION_PATTERN = re.compile(r"\d+\.\d+")
 NOTEBOOK_PATH_PATTERN = re.compile(r"[A-Za-z0-9._/-]+")
@@ -108,7 +111,7 @@ class Config:
 
 
 def validate_ref(ref: str) -> str:
-    """Return ``ref`` if a branch, a tag or a commit can be named that way.
+    """Return ``ref`` if a tag, a commit or a branch can be named that way.
 
     Parameters
     ----------
@@ -123,22 +126,24 @@ def validate_ref(ref: str) -> str:
     Raises
     ------
     SyncError
-        If the ref is empty, holds a character other than letters, digits, ``.``, ``_``,
-        ``-`` and ``/``, starts with ``-``, or holds ``..``.
+        If the ref is empty, holds a character other than letters, digits, ``.``, ``_``
+        and ``-`` (so no ``/``), starts with ``-``, or holds ``..``.
 
     Notes
     -----
-    When to use: on every ref before it is written anywhere.
+    When to use: on every ref before it is written anywhere. A ref is one path segment of
+    the Colab URL, so a branch whose name holds a slash is named by its commit hash.
 
     Examples
     --------
-    >>> validate_ref("feature/colab-1.2")
-    'feature/colab-1.2'
+    >>> validate_ref("v1.0.0")
+    'v1.0.0'
     """
     if not REF_PATTERN.fullmatch(ref) or ref.startswith("-") or ".." in ref:
         raise SyncError(
-            f"The ref {ref!r} is refused: a ref is made of letters, digits, '.', '_', "
-            "'-' and '/', does not start with '-' and does not hold '..'."
+            f"The ref {ref!r} is refused: a ref is made of letters, digits, '.', '_' "
+            "and '-', never a '/', does not start with '-' and does not hold '..'. A branch "
+            "whose name holds a slash is named by its commit hash."
         )
     return ref
 
@@ -280,7 +285,8 @@ def owned_line(line: str, notebook: str, config: Config) -> re.Match[str] | None
 
     The script owns exactly two shapes, matched on the whole line: the text link it
     writes, and the image badge an earlier version wrote, each pointing at the Colab URL
-    of this repository for this notebook, at any ref. Any other line, a link to another
+    of this repository for this notebook, at any ref (one path segment with no slash, parenthesis or space, so the rest of the
+    target is this notebook's path exactly). Any other line, a link to another
     notebook included, belongs to the author and is never touched.
 
     Returns
@@ -290,7 +296,7 @@ def owned_line(line: str, notebook: str, config: Config) -> re.Match[str] | None
     """
     target = (
         re.escape(f"({COLAB_GITHUB_URL}/{config.repository}/blob/")
-        + r"(?P<ref>.+)/"
+        + r"(?P<ref>[^/()\s]+)/"
         + re.escape(notebook)
         + r"\)"
     )
@@ -635,7 +641,7 @@ def _parse_arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--ref",
-        help="git ref for every notebook; by default each notebook keeps the ref it carries",
+        help="tag or commit (no slash) for every notebook; by default each notebook keeps the ref it carries",
     )
     parser.add_argument(
         "--check",

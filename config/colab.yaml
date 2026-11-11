@@ -6,10 +6,11 @@
 # pushed to; the link, the install and the download all name it.
 repository: Ramdam17/fnirs-tutorials
 
-# Ref (branch, tag or commit) written into a notebook that carries none. The Colab link
+# Ref (tag, commit or branch without a slash) written into a notebook that carries none. The Colab link
 # and the setup cell of a notebook name the same ref: the committed notebooks carry
 # `main`, so a reader on Colab gets the latest notebook with the latest package. A
-# numbered release writes its tag into both with `--ref`.
+# numbered release writes its tag into both with `--ref`. A ref never holds a slash: a
+# branch whose name holds one is named by its commit hash.
 default_ref: main
 
 # Colab runtime version every notebook asks for, as a string. Measured on 2026-11-11: the

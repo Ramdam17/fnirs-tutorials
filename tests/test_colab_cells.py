@@ -80,7 +80,7 @@ def test_book_notebook_has_link_cell_and_runtime_request(notebook: str) -> None:
     link = re.compile(
         re.escape(f"[{sync.LINK_TEXT}](https://colab.research.google.com/github/")
         + re.escape(f"{CONFIG.repository}/blob/")
-        + r"(?P<ref>.+)/"
+        + r"(?P<ref>[^/()\s]+)/"
         + re.escape(notebook)
         + r"\)"
     )
@@ -783,7 +783,26 @@ def test_the_layout_is_kept_outside_the_lines_the_script_owns(project: Path) -> 
 
 
 @pytest.mark.parametrize(
-    "ref", ["-x", "a..b", "a b", "a;b", "$(id)", "", "a'b", 'a"b', "a\nb", "é", "--ref"]
+    "ref",
+    [
+        "-x",
+        "a..b",
+        "a b",
+        "a;b",
+        "$(id)",
+        "",
+        "a'b",
+        'a"b',
+        "a\nb",
+        "é",
+        "--ref",
+        "feature/colab_1",
+        "release/v1",
+        "/",
+        "main/",
+        "/main",
+        "a//b",
+    ],
 )
 def test_a_refused_ref_writes_nothing(
     project: Path, ref: str, caplog: pytest.LogCaptureFixture
@@ -795,7 +814,7 @@ def test_a_refused_ref_writes_nothing(
     assert _snapshot(project) == before
 
 
-@pytest.mark.parametrize("ref", ["main", "v1.2.3", "feature/colab_1", "a" * 40])
+@pytest.mark.parametrize("ref", ["main", "v1.2.3", "feature-colab_1", "a" * 40])
 def test_valid_refs_are_accepted(ref: str) -> None:
     assert sync.validate_ref(ref) == ref
 
@@ -970,6 +989,15 @@ AUTHOR_LINES = {
         f"[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)]({OTHER_URL})"
     ),
     "script-link-with-text-around": f"Run {LINK_MAIN} now",
+    # A ref is one path segment: neither line below is the script's link to a.ipynb.
+    "script-text-other-path-then-this-link": (
+        f"[Open this notebook in Google Colab]({OTHER_URL}), or the solution "
+        f"[here]({LINK_MAIN.split('](', 1)[1]}"
+    ),
+    "script-text-longer-path-ending-with-this-one": (
+        "[Open this notebook in Google Colab](https://colab.research.google.com/github/"
+        f"{CONFIG.repository}/blob/main/x/book/a.ipynb)"
+    ),
 }
 
 
@@ -985,9 +1013,8 @@ def test_a_line_of_the_author_survives_a_write_unchanged(
     assert _snapshot(root) == once
     lines = "".join(_read(root, "book/a.ipynb")["cells"][0]["source"]).split("\n")
     assert lines.count(author_line) == 1
-    assert (
-        sum(line.startswith("[Open this") and "a.ipynb" in line for line in lines) == 1
-    )
+    owned = [line for line in lines if sync.owned_line(line, "book/a.ipynb", CONFIG)]
+    assert len(owned) == 1
 
 
 def test_only_the_two_shapes_for_this_notebook_are_the_scripts() -> None:
@@ -1000,3 +1027,43 @@ def test_only_the_two_shapes_for_this_notebook_are_the_scripts() -> None:
         assert mine(line, notebook, CONFIG) is None
     assert mine(" " + LINK_MAIN, notebook, CONFIG) is None
     assert mine(LINK_MAIN, notebook, CONFIG).group("ref") == "main"
+
+
+def test_a_ref_with_a_slash_is_not_part_of_an_owned_line() -> None:
+    notebook = "book/a.ipynb"
+    prefix = f"https://colab.research.google.com/github/{CONFIG.repository}/blob/"
+    assert (
+        sync.owned_line(
+            f"[Open this notebook in Google Colab]({prefix}feature/x/{notebook})",
+            notebook,
+            CONFIG,
+        )
+        is None
+    )
+    # A ref the validator refuses for another reason is still the script's line.
+    odd = sync.owned_line(
+        f"[Open this notebook in Google Colab]({prefix}a;b/{notebook})",
+        notebook,
+        CONFIG,
+    )
+    assert odd is not None and odd.group("ref") == "a;b"
+
+
+def test_a_setup_cell_that_carries_a_ref_with_a_slash_is_refused(
+    project: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    assert sync.main(["--root", str(project)]) == 0
+    path = project / "book/a.ipynb"
+    text = path.read_text(encoding="utf-8")
+    assert f'_REF = \\"{CONFIG.default_ref}\\"' in text
+    path.write_text(
+        text.replace(f'_REF = \\"{CONFIG.default_ref}\\"', '_REF = \\"feature/x\\"'),
+        encoding="utf-8",
+    )
+    before = _snapshot(project)
+    with caplog.at_level(logging.ERROR):
+        assert sync.main(["--root", str(project)]) == 2
+        # `--check` reports a notebook it cannot render as a difference.
+        assert sync.main(["--root", str(project), "--check"]) == 1
+    assert "refused" in caplog.text
+    assert _snapshot(project) == before
