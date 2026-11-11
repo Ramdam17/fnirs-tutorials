@@ -154,6 +154,10 @@ class TimeoutConfig:
         return self.timeouts.get(notebook, self.default_timeout_s)
 
 
+_KERNELSPEC_SIGN = "a kernelspec in its front matter"
+_TEXT_SIGN = "a {code-cell} directive or an {eval} role in its text"
+
+
 def _front_matter_of(text: str, where: str, page: Path) -> dict[str, Any]:
     """Return the YAML front matter of a markdown text as a mapping (empty if none)."""
     if not text.startswith("---"):
@@ -171,9 +175,10 @@ def _front_matter_of(text: str, where: str, page: Path) -> dict[str, Any]:
     return front_matter if isinstance(front_matter, dict) else {}
 
 
-def _skips_execution(front_matter: dict[str, Any]) -> bool:
-    """Tell whether the author excluded the page from execution, as MyST reads it.
+def _skip_decision(front_matter: dict[str, Any]) -> tuple[str | None, Any]:
+    """Return the key that decides whether the author excluded the page, and its value.
 
+    This is the one place where the precedence of the two keys is written.
     ``execute.skip`` wins; the deprecated ``skip_execution`` fills it only when
     ``execute`` is not a mapping or holds no non-null ``skip`` (bundle lines 207880 to
     207886). Only the YAML boolean true counts. MyST's ``validateBoolean`` (bundle
@@ -181,12 +186,22 @@ def _skips_execution(front_matter: dict[str, Any]) -> bool:
     page with ``skip: 'true'`` is skipped by MyST; the runner refuses the string on
     purpose, to keep the author's statement an unambiguous boolean, which can only err
     towards a refusal.
+
+    Returns
+    -------
+    tuple
+        ``("execute.skip", value)`` when ``execute`` is a mapping with a non-null
+        ``skip``, else ``("skip_execution", value)`` when that key is non-null, else
+        ``(None, None)``.
     """
     execute = front_matter.get("execute")
     skip = execute.get("skip") if isinstance(execute, dict) else None
     if skip is not None:
-        return skip is True
-    return front_matter.get("skip_execution") is True
+        return "execute.skip", skip
+    legacy = front_matter.get("skip_execution")
+    if legacy is not None:
+        return "skip_execution", legacy
+    return None, None
 
 
 def _refuse_executable_markdown(page: Path, where: str) -> None:
@@ -217,7 +232,7 @@ def _refuse_executable_markdown(page: Path, where: str) -> None:
 
     Such a page is accepted only if its author excluded it with ``execute: {skip:
     true}`` or the deprecated ``skip_execution: true`` (lines 207880 to 207886; see
-    :func:`_skips_execution`). A page with a kernelspec and no executable node is
+    :func:`_skip_decision`). A page with a kernelspec and no executable node is
     refused all the same, because the runner does not parse the MyST nodes.
 
     A page that opens with ``---`` is read as having a front matter, up to the next
@@ -251,18 +266,36 @@ def _refuse_executable_markdown(page: Path, where: str) -> None:
     nested = jupyter.get("kernelspec") if isinstance(jupyter, dict) else None
     signs = []
     if front_matter.get("kernelspec") is not None or nested is not None:
-        signs.append("a kernelspec in its front matter")
+        signs.append(_KERNELSPEC_SIGN)
     if _EXECUTABLE_TEXT.search(text):
-        signs.append("a {code-cell} directive or an {eval} role in its text")
-    if not signs or _skips_execution(front_matter):
+        signs.append(_TEXT_SIGN)
+    skip_key, skip_value = _skip_decision(front_matter)
+    if not signs or skip_value is True:
         return
-    raise ValueError(
-        f"{where}: markdown page {page.name!r} is meant for execution ("
-        f"{' and '.join(signs)}), but this runner executes notebooks only, so the "
-        "code of the page would be published with no output. Convert it to a "
-        "notebook, or state that its code is not executed with "
-        "'execute: {skip: true}' in its front matter."
+    # The message is four parts joined by one space; two of them are conditional.
+    parts = [
+        (
+            f"{where}: markdown page {page.name!r} is refused: it holds "
+            f"{' and '.join(signs)}, which marks it as a page to execute, and this "
+            "runner executes notebooks only, so any code it holds would be published "
+            "with no output."
+        )
+    ]
+    if signs == [_KERNELSPEC_SIGN]:
+        parts.append(
+            "A kernelspec is refused whether or not the page holds code, because the "
+            "runner does not parse the page."
+        )
+    if skip_key is not None:
+        parts.append(
+            f"Its {skip_key} is {skip_value!r}; only the YAML boolean true excludes "
+            "a page."
+        )
+    parts.append(
+        "Convert it to a notebook, or set 'execute: {skip: true}' in its front "
+        "matter to state that the page is not executed."
     )
+    raise ValueError(" ".join(parts))
 
 
 def _collect_notebooks(entries: Any, where: str, root: Path, found: list[str]) -> None:

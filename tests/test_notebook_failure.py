@@ -228,42 +228,82 @@ def test_toc_treats_an_upper_case_extension_as_a_notebook(tmp_path: Path) -> Non
 
 
 def test_toc_refuses_a_markdown_page_with_a_kernelspec(tmp_path: Path) -> None:
-    """A MyST build executes such a page; this runner would not."""
+    """A page with a kernelspec and no code is refused because it is not parsed.
+
+    MyST executes nothing for such a page (it returns before the kernelspec test,
+    bundle line 307275); the runner refuses it all the same, as its message says,
+    because the runner does not parse the page.
+    """
     page = "---\nkernelspec:\n  name: python3\n---\n\n# Title\n"
     myst = _project(tmp_path, "    - file: executable.md\n", [])
     _write(tmp_path / "executable.md", page)
-    with pytest.raises(ValueError, match="kernelspec"):
+    with pytest.raises(ValueError, match="kernelspec") as raised:
         list_notebooks(myst)
+    assert "whether or not the page holds code" in str(raised.value)
 
 
 _CODE_CELL = "```{code-cell} python\nprint(1)\n```\n"
+# Each case: page text, the sign its message must name, whether the kernelspec is the
+# single sign (part 2 of the message is then present, else absent), and the skip phrase
+# of part 3 (None when the page holds no skip value, and part 3 is then absent).
 _REFUSED_PAGES = {
     # row: .md with a top-level kernelspec (also without any executable node)
     "top-level kernelspec, no executable node": (
         "---\nkernelspec:\n  name: python3\n---\n\n# Title\n",
         "kernelspec",
+        True,
+        None,
     ),
     "top-level kernelspec with a code cell": (
         "---\nkernelspec:\n  name: python3\n---\n\n" + _CODE_CELL,
         "kernelspec",
+        False,
+        None,
     ),
     # row: .md with jupyter.kernelspec
     "nested jupyter.kernelspec": (
         "---\njupyter:\n  kernelspec:\n    name: python3\n---\n\n# Title\n",
         "kernelspec",
+        True,
+        None,
     ),
     # row: .md with {code-cell} or {eval} and no kernelspec
-    "code cell without kernelspec": ("# Title\n\n" + _CODE_CELL, "code-cell"),
-    "colon-fenced code cell": ("# T\n\n:::{code-cell} python\n1\n:::\n", "code-cell"),
-    "eval role without kernelspec": ("The value is {eval}`1 + 1`.\n", "eval"),
+    "code cell without kernelspec": (
+        "# Title\n\n" + _CODE_CELL,
+        "code-cell",
+        False,
+        None,
+    ),
+    "colon-fenced code cell": (
+        "# T\n\n:::{code-cell} python\n1\n:::\n",
+        "code-cell",
+        False,
+        None,
+    ),
+    "eval role without kernelspec": (
+        "The value is {eval}`1 + 1`.\n",
+        "eval",
+        False,
+        None,
+    ),
     # skip semantics settled in the bundle (lines 207880 to 207886)
     "skip false wins over skip_execution true": (
         "---\nkernelspec:\n  name: p\nexecute:\n  skip: false\nskip_execution: true\n---\n",
         "kernelspec",
+        True,
+        "Its execute.skip is False;",
     ),
     "skip as a string is refused on purpose": (
         "---\nkernelspec:\n  name: p\nexecute:\n  skip: 'true'\n---\n",
         "kernelspec",
+        True,
+        "Its execute.skip is 'true';",
+    ),
+    "skip_execution as a string": (
+        "---\nkernelspec:\n  name: p\nskip_execution: 'true'\n---\n",
+        "kernelspec",
+        True,
+        "Its skip_execution is 'true';",
     ),
 }
 _ACCEPTED_PAGES = {
@@ -294,13 +334,25 @@ def test_toc_refuses_a_markdown_page_meant_for_execution(
     tmp_path: Path, name: str
 ) -> None:
     """Each sign of a page meant for execution is refused, naming entry and page."""
-    page, sign = _REFUSED_PAGES[name]
+    page, sign, kernelspec_only, skip_phrase = _REFUSED_PAGES[name]
     myst = _project(tmp_path, "    - file: page.md\n", [])
     _write(tmp_path / "page.md", page)
     with pytest.raises(ValueError, match="page.md") as raised:
         list_notebooks(myst)
-    assert sign in str(raised.value)
-    assert "execute: {skip: true}" in str(raised.value)
+    message = str(raised.value)
+    assert sign in message
+    assert "executes notebooks only" in message  # part 1
+    assert "published with no output" in message  # part 1
+    assert (
+        "whether or not the page holds code" in message
+    ) is kernelspec_only  # part 2
+    if skip_phrase is None:  # part 3
+        assert "only the YAML boolean true" not in message
+    else:
+        assert skip_phrase in message
+        assert "only the YAML boolean true excludes a page." in message
+    assert "'execute: {skip: true}'" in message  # part 4
+    assert "to state that the page is not executed" in message  # part 4
 
 
 @pytest.mark.parametrize(
