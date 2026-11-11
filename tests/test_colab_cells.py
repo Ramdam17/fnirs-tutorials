@@ -708,6 +708,8 @@ LINK_MAIN = (
         f"# T\n{OLD_BADGE}\n\nText",
         f"# T\n{OLD_BADGE}",
         f"Intro line\n# T\n\nText\n{LINK_MAIN}\nMore",
+        f"{LINK_MAIN}\n# T\n\nText",
+        f"{OLD_BADGE}\n# T\n\nText",
     ],
     ids=[
         "title-alone-no-newline",
@@ -720,6 +722,8 @@ LINK_MAIN = (
         "old-badge",
         "old-badge-alone",
         "text-before-and-stray-link",
+        "link-above-the-title",
+        "old-badge-above-the-title",
     ],
 )
 def test_every_shape_of_the_first_cell_is_written_once_and_stays(
@@ -952,3 +956,47 @@ def test_a_notebook_that_is_not_json_is_refused_input(project: Path) -> None:
         sync.load_notebook(path)
     assert sync.main(["--root", str(project), "--check"]) == 2
     assert sync.main(["--root", str(project)]) == 2
+
+
+OTHER_URL = (
+    f"https://colab.research.google.com/github/{CONFIG.repository}"
+    "/blob/main/book/other.ipynb"
+)
+AUTHOR_LINES = {
+    "link-to-another-notebook": f"[Other]({OTHER_URL})",
+    "link-with-text-around": f"See [Other]({OTHER_URL}) for more.",
+    "script-text-other-path": f"[Open this notebook in Google Colab]({OTHER_URL})",
+    "badge-other-path": (
+        f"[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)]({OTHER_URL})"
+    ),
+    "script-link-with-text-around": f"Run {LINK_MAIN} now",
+}
+
+
+@pytest.mark.parametrize("author_line", AUTHOR_LINES.values(), ids=AUTHOR_LINES.keys())
+def test_a_line_of_the_author_survives_a_write_unchanged(
+    tmp_path: Path, author_line: str
+) -> None:
+    root = _make_project(tmp_path / "project", f"# T\n\nText.\n\n{author_line}")
+    assert sync.main(["--root", str(root)]) == 0
+    once = _snapshot(root)
+    assert sync.main(["--root", str(root), "--check"]) == 0
+    assert sync.main(["--root", str(root)]) == 0
+    assert _snapshot(root) == once
+    lines = "".join(_read(root, "book/a.ipynb")["cells"][0]["source"]).split("\n")
+    assert lines.count(author_line) == 1
+    assert (
+        sum(line.startswith("[Open this") and "a.ipynb" in line for line in lines) == 1
+    )
+
+
+def test_only_the_two_shapes_for_this_notebook_are_the_scripts() -> None:
+    mine = sync.owned_line
+    notebook = "book/a.ipynb"
+    assert mine(LINK_MAIN, notebook, CONFIG) and mine(OLD_BADGE, notebook, CONFIG)
+    assert mine(LINK_MAIN + "\n", notebook, CONFIG)
+    assert mine(LINK_MAIN, "book/other.ipynb", CONFIG) is None
+    for line in AUTHOR_LINES.values():
+        assert mine(line, notebook, CONFIG) is None
+    assert mine(" " + LINK_MAIN, notebook, CONFIG) is None
+    assert mine(LINK_MAIN, notebook, CONFIG).group("ref") == "main"

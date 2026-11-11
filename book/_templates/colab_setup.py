@@ -197,6 +197,9 @@ def _setup() -> None:
             ]
         )
         installed = _time.monotonic()
+        # The package above comes through git, this script through raw.githubusercontent.com,
+        # which answers with "cache-control: max-age=300". For up to five minutes after a
+        # push to main, the script can be the earlier one while the package is the new one.
         _fetch(
             f"https://raw.githubusercontent.com/{_REPOSITORY}/{_REF}/scripts/download_data.py",
             script,

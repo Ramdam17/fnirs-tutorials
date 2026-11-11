@@ -40,7 +40,7 @@ Run it after editing the template, ``config/colab.yaml`` or the overrides of
 Examples
 --------
     uv run python scripts/sync_colab_cells.py
-    uv run python scripts/sync_colab_cells.py --ref "$(git rev-parse HEAD)"
+    uv run python scripts/sync_colab_cells.py --ref v1.0.0
     uv run python scripts/sync_colab_cells.py --check
 """
 
@@ -275,18 +275,34 @@ def link_line(config: Config, ref: str, notebook: str) -> str:
     return f"[{LINK_TEXT}]({url})"
 
 
-def _is_link_line(line: str, config: Config) -> bool:
-    """Tell whether a line is a Colab link of this repository, text or image badge.
+def owned_line(line: str, notebook: str, config: Config) -> re.Match[str] | None:
+    """Match a line of the first markdown cell that this script wrote for ``notebook``.
 
-    The test is on the target of the link, so the badge image line written by an earlier
-    version is recognised as well and replaced.
+    The script owns exactly two shapes, matched on the whole line: the text link it
+    writes, and the image badge an earlier version wrote, each pointing at the Colab URL
+    of this repository for this notebook, at any ref. Any other line, a link to another
+    notebook included, belongs to the author and is never touched.
+
+    Returns
+    -------
+    re.Match or None
+        The match, whose group ``ref`` is the ref the line names, or None.
     """
-    text = line.rstrip("\n")
-    return (
-        text.startswith("[")
-        and text.endswith(")")
-        and f"]({COLAB_GITHUB_URL}/{config.repository}/blob/" in text
+    target = (
+        re.escape(f"({COLAB_GITHUB_URL}/{config.repository}/blob/")
+        + r"(?P<ref>.+)/"
+        + re.escape(notebook)
+        + r"\)"
     )
+    shapes = (
+        re.escape(f"[{LINK_TEXT}]") + target,
+        r"\[!\[[^\]\n]*\]\([^()\s]+\)\]" + target,
+    )
+    for shape in shapes:
+        match = re.fullmatch(shape, line.rstrip("\n"))
+        if match:
+            return match
+    return None
 
 
 def _to_lines(text: str) -> list[str]:
@@ -345,17 +361,10 @@ def carried_ref(nb: dict[str, Any], notebook: str, config: Config) -> str | None
             break
     first = _first_markdown(nb)
     if first is not None:
-        pattern = re.compile(
-            re.escape(f"{COLAB_GITHUB_URL}/{config.repository}/blob/")
-            + r"(?P<ref>.+)/"
-            + re.escape(notebook)
-            + r"\)$"
-        )
         for line in _source_lines(first):
-            if _is_link_line(line, config):
-                match = pattern.search(line.rstrip("\n"))
-                if match:
-                    return match.group("ref")
+            match = owned_line(line, notebook, config)
+            if match:
+                return match.group("ref")
     return None
 
 
@@ -430,19 +439,22 @@ def sync_notebook(
     result = dict(nb)
     cells = list(nb["cells"])
 
-    # Link: every link line is removed from the first markdown cell, and one is written
-    # after the title line with a blank line on each side. The blank lines that followed
-    # the title are dropped first, so that a cell that already holds the link, or none,
-    # comes out the same.
+    # Link: the lines this script owns (see owned_line) are removed from the whole first
+    # markdown cell, above the title too, and one is written after the title line with a
+    # blank line on each side. The blank lines that followed the title are dropped first,
+    # so that a cell that already holds the link, or none, comes out the same. Every
+    # other line is the author's and is left as it is.
     first = _first_markdown({"cells": cells})
     if first is None:
         raise SyncError(f"{notebook}: no markdown cell to hold the link.")
-    lines = _source_lines(first)
+    lines = [
+        line for line in _source_lines(first) if not owned_line(line, notebook, config)
+    ]
     title = _title_index(lines)
     if title is None:
         raise SyncError(f"{notebook}: the first markdown cell has no title line.")
     before = lines[:title] + [lines[title].rstrip("\n") + "\n"]
-    after = [line for line in lines[title + 1 :] if not _is_link_line(line, config)]
+    after = lines[title + 1 :]
     while after and not after[0].strip():
         after.pop(0)
     link = link_line(config, ref, notebook)
@@ -535,7 +547,7 @@ def check_notebook(
     links = [
         line.rstrip("\n")
         for line in (_source_lines(first) if first is not None else [])
-        if _is_link_line(line, config)
+        if owned_line(line, notebook, config)
     ]
     wanted = link_line(config, ref, notebook)
     if not links:
