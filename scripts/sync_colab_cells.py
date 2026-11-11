@@ -37,10 +37,16 @@ The line that the cell prints to report its duration starts with the prefix
 Exit codes
 ----------
 0: every notebook is in order, or was written.
-1: only with ``--check``, every notebook could be judged and at least one differs.
-2: an input is refused (a configuration, a ``--ref``, an unreadable notebook, or a ref
-that a notebook carries and the script refuses); ``--check`` still reports every
-notebook before it ends with 2.
+1: only with ``--check``, at least one notebook differs from what the script writes. A
+notebook that the write refuses for its content (no title line or no markdown cell, for
+example) is reported here as a difference.
+2: a refused ``--ref``, a refused value of the configuration, a notebook that cannot be
+read as a notebook (the run stops at it), a notebook that the write refuses, or a ref
+that a notebook carries and the script refuses (``--check`` then still reports the other
+notebooks before it ends with 2).
+
+A missing or malformed ``config/colab.yaml``, ``pyproject.toml``, template or ``myst.yml``
+is not caught: the script then ends with the Python traceback and exit code 1.
 
 When to use
 -----------
@@ -647,7 +653,7 @@ def _parse_arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="write nothing and report every notebook; exit 0 when all match, 1 when one differs, 2 when one is refused",
+        help="write nothing and report every notebook; exit 0 when all match, 1 when one differs, 2 when one carries a refused ref or cannot be read",
     )
     parser.add_argument(
         "--root", type=Path, default=DEFAULT_ROOT, help="repository root"
@@ -661,8 +667,9 @@ def run(root: Path, ref: str | None, check: bool) -> int:
     Returns
     -------
     int
-        0 when all is in order, 1 when ``check`` judged every notebook and at least one
-        differs, 2 (``EXIT_BAD_INPUT``) when ``check`` met a notebook it refuses.
+        0 when all is in order, 1 when ``check`` found at least one notebook that differs
+        (a notebook the write would refuse for its content counts as one), 2
+        (``EXIT_BAD_INPUT``) when ``check`` met a notebook that carries a refused ref.
 
     Raises
     ------
