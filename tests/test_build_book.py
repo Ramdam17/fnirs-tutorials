@@ -41,8 +41,6 @@ build_book = importlib.util.module_from_spec(_spec)
 sys.modules["build_book"] = build_book
 _spec.loader.exec_module(build_book)
 
-# A built site that does not exist: the pages checked with it hold no local frame.
-NO_SITE = Path("/nonexistent/built/site")
 NOTEBOOK = "book/notebook_smoke.ipynb"
 RUN_NOTEBOOKS = "uv run python -m pytest tests/test_notebooks.py -v"
 
@@ -172,14 +170,14 @@ def run_main(root: Path, runner: Any) -> int:
 def test_check_accepts_the_pages_that_hold_nothing_to_execute(stem: str) -> None:
     """A notebook, a page without code, a page that only shows code, a skipped page."""
     page = load_fixture(stem)
-    assert build_book.check_built_pages({page["location"]: page}, [], [], NO_SITE) == []
+    assert build_book.check_built_pages({page["location"]: page}, [], []) == []
 
 
 @pytest.mark.parametrize("stem", sorted(REFUSED))
 def test_check_refuses_a_page_that_holds_code_to_execute(stem: str) -> None:
     """The message names the page and the kind of node; the exit code is its own."""
     page = load_fixture(stem)
-    problems = build_book.check_built_pages({page["location"]: page}, [], [], NO_SITE)
+    problems = build_book.check_built_pages({page["location"]: page}, [], [])
     assert len(problems) == 1
     assert problems[0].exit_code == build_book.EXIT_PAGE_HOLDS_CODE
     message = str(problems[0])
@@ -195,7 +193,7 @@ def test_check_refuses_a_page_whose_recorded_skip_is_not_the_boolean_true(
     """Only ``execute.skip: true`` excludes a page; the page is a real one, one key changed."""
     page = load_fixture("skipped")
     page["frontmatter"]["execute"] = {"skip": skip}
-    problems = build_book.check_built_pages({page["location"]: page}, [], [], NO_SITE)
+    problems = build_book.check_built_pages({page["location"]: page}, [], [])
     assert len(problems) == 1
     assert problems[0].exit_code == build_book.EXIT_PAGE_HOLDS_CODE
 
@@ -222,7 +220,6 @@ def test_check_refuses_a_missing_notebook_page_and_names_the_notebook() -> None:
         {page["location"]: page},
         [page_path("no_code"), NOTEBOOK],
         [NOTEBOOK],
-        NO_SITE,
     )
     assert len(problems) == 1
     assert problems[0].exit_code == build_book.EXIT_PAGE_NOT_BUILT
@@ -233,7 +230,7 @@ def test_check_refuses_a_missing_notebook_page_and_names_the_notebook() -> None:
 
 def test_check_refuses_a_missing_markdown_page_and_calls_it_a_page() -> None:
     """A markdown page with no page file is refused too, named as a page."""
-    problems = build_book.check_built_pages({}, ["book/no_code.md"], [], NO_SITE)
+    problems = build_book.check_built_pages({}, ["book/no_code.md"], [])
     assert len(problems) == 1
     assert "page 'book/no_code.md' of the table of contents has no built page" in str(
         problems[0]
@@ -723,7 +720,6 @@ DIRECTIVE_TARGETS = {
     "image": "parts/target.png",
     "figure": "parts/target.png",
     "download": "parts/target.zip",
-    "iframe": "parts/target.html",
 }
 
 
@@ -741,20 +737,6 @@ def test_the_file_each_directive_names_is_staged(
     (root / "book" / target).write_bytes(b"content")
     staged = build_book.stage_book(root, root / "_build" / "executed")
     assert (staged.stage_dir / "book" / target).read_bytes() == b"content"
-
-
-def test_the_iframe_directive_is_staged_with_the_colon_fence_too(
-    tmp_path: Path,
-) -> None:
-    root = make_project(
-        tmp_path,
-        ["notebook_smoke", "no_code"],
-        {"no_code": "# Page\n\n:::{iframe} frames/live.html\n:width: 100%\n:::\n"},
-    )
-    (root / "book" / "frames").mkdir()
-    (root / "book" / "frames" / "live.html").write_text("<p>x</p>", encoding="utf-8")
-    staged = build_book.stage_book(root, root / "_build" / "executed")
-    assert (staged.stage_dir / "book" / "frames" / "live.html").is_file()
 
 
 def test_a_root_relative_reference_is_resolved_against_the_root(
@@ -834,19 +816,19 @@ def test_the_files_the_markdown_cells_of_a_notebook_reference_are_staged(
     source = root / NOTEBOOK
     source.write_text(
         _notebook_with_markdown(
-            "A figure: ![fig](figs/n.png)\n\n```{iframe} frames/n.html\n```\n"
+            "A figure: ![fig](figs/n.png)\n\n```{include} parts/n.md\n```\n"
         ),
         encoding="utf-8",
     )
     stamp = (root / "_build" / "executed" / NOTEBOOK).stat().st_mtime - 100
     os.utime(source, (stamp, stamp))
-    for name in ("figs/n.png", "frames/n.html", "code.png"):
+    for name in ("figs/n.png", "parts/n.md", "code.png"):
         path = root / "book" / name
         path.parent.mkdir(exist_ok=True)
         path.write_bytes(b"x")
     staged = build_book.stage_book(root, root / "_build" / "executed")
     assert (staged.stage_dir / "book" / "figs" / "n.png").is_file()
-    assert (staged.stage_dir / "book" / "frames" / "n.html").is_file()
+    assert (staged.stage_dir / "book" / "parts" / "n.md").is_file()
     # Code cells are not searched, and the executed copy is not replaced by the source.
     assert not (staged.stage_dir / "book" / "code.png").exists()
     assert (staged.stage_dir / NOTEBOOK).read_text() == '{"executed": true}'
@@ -991,37 +973,18 @@ def test_the_maker_of_the_page_files_stops_before_writing_in_the_repository(
 
 
 # --------------------------------------------------------------------------------------
-# A local frame must have its file in the built site
+# A frame must point to another site over https
 # --------------------------------------------------------------------------------------
 
 FRAME_SOURCE = "frames/live.html"
 
 
-class FakeBuildWithFiles(FakeBuild):
-    """A fake build that also leaves files in the built site, as a deployment step would."""
-
-    def __init__(self, stems: list[str], site_files: list[str]) -> None:
-        super().__init__(stems)
-        self.site_files = site_files
-
-    def __call__(self, stage_dir: Path) -> int:
-        code = super().__call__(stage_dir)
-        for name in self.site_files:
-            path = stage_dir / "_build" / "html" / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("<p>live</p>", encoding="utf-8")
-        return code
-
-
-def frame_page(stem: str = "frame_relative", **changes: Any) -> dict[str, Any]:
-    """A real page file with one frame, with the slug or the source replaced."""
+def frame_page(stem: str, src: str) -> dict[str, Any]:
+    """A real page file with one frame whose source is replaced."""
     page = load_fixture(stem)
-    if "slug" in changes:
-        page["slug"] = changes["slug"]
-    if "src" in changes:
-        frame = page["mdast"]["children"][0]["children"][0]
-        assert frame["type"] == "iframe"
-        frame["src"] = changes["src"]
+    frame = page["mdast"]["children"][0]["children"][0]
+    assert frame["type"] == "iframe"
+    frame["src"] = src
     return page
 
 
@@ -1038,141 +1001,109 @@ def test_the_fixture_pages_hold_one_frame_each_with_the_source_as_written() -> N
     }
 
 
-def test_a_local_frame_absent_from_the_built_site_is_refused_and_named(
-    tmp_path: Path,
-) -> None:
-    page = frame_page()
-    problems = build_book.check_built_pages(
-        {page["location"]: page}, [], [], tmp_path / "site"
-    )
-    assert len(problems) == 1
-    assert problems[0].exit_code == build_book.EXIT_FRAME_MISSING
-    message = str(problems[0])
-    assert f"page {page['location']!r}" in message
-    assert f"source {FRAME_SOURCE!r}" in message
-    assert "_build/html/frame-relative/frames/live.html" in message
-    assert "is a local file" in message
-    assert "does not copy the target of a frame" in message
-    assert "published with an empty frame" in message
-    assert "give the frame a URL with a scheme" in message
-
-
-def test_a_local_frame_present_in_the_built_site_is_accepted(tmp_path: Path) -> None:
-    page = frame_page()
-    site = tmp_path / "site"
-    (site / "frame-relative" / "frames").mkdir(parents=True)
-    (site / "frame-relative" / "frames" / "live.html").write_text("x", encoding="utf-8")
-    assert build_book.check_built_pages({page["location"]: page}, [], [], site) == []
-
-
-def test_a_frame_whose_source_has_a_scheme_is_accepted_without_a_file(
-    tmp_path: Path,
-) -> None:
-    page = load_fixture("frame_scheme")
-    assert (
-        build_book.check_built_pages({page["location"]: page}, [], [], tmp_path) == []
-    )
-
-
-def test_a_frame_in_the_page_with_the_slug_index_is_looked_for_at_the_site_root(
-    tmp_path: Path,
-) -> None:
-    page = frame_page(slug="index")
-    problems = build_book.check_built_pages({page["location"]: page}, [], [], tmp_path)
-    assert "_build/html/frames/live.html" in str(problems[0])
-    (tmp_path / "frames").mkdir()
-    (tmp_path / "frames" / "live.html").write_text("x", encoding="utf-8")
-    assert (
-        build_book.check_built_pages({page["location"]: page}, [], [], tmp_path) == []
-    )
-
-
-def test_a_root_relative_frame_must_start_with_the_base_url(tmp_path: Path) -> None:
-    page = load_fixture("frame_root_relative")
-    (tmp_path / "frames").mkdir()
-    (tmp_path / "frames" / "live.html").write_text("x", encoding="utf-8")
-    base = "/fnirs-tutorials"
-    problems = build_book.check_built_pages(
-        {page["location"]: page}, [], [], tmp_path, base_url=base
-    )
-    assert len(problems) == 1
-    assert "would request it outside the site, where" in str(problems[0])
-    assert "<outside" not in str(problems[0])
-    prefixed = frame_page("frame_root_relative", src=f"{base}/frames/live.html")
-    assert (
-        build_book.check_built_pages(
-            {prefixed["location"]: prefixed}, [], [], tmp_path, base_url=base
-        )
-        == []
-    )
-    assert (
-        build_book.check_built_pages({page["location"]: page}, [], [], tmp_path) == []
-    )
-
-
 @pytest.mark.parametrize(
-    ("src", "slug", "base", "expected"),
+    ("src", "expected"),
     [
-        ("frames/live.html", "plain", "/fnirs-tutorials", "plain/frames/live.html"),
-        ("../frames/live.html", "deep", "/fnirs-tutorials", "frames/live.html"),
-        ("../frames/live.html", "index", "/fnirs-tutorials", "<outside the site>"),
-        ("../../x.html", "deep", "/fnirs-tutorials", "<outside the site>"),
-        ("../x.html", "index", "", "x.html"),
-        ("/frames/live.html", "p", "", "frames/live.html"),
-        ("/frames/live.html", "p", "/fnirs-tutorials", "<outside the site>"),
-        ("/fnirs-tutorials/f.html", "p", "/fnirs-tutorials", "f.html"),
-        ("/fnirs-tutorials", "p", "/fnirs-tutorials", "index.html"),
-        ("/fnirs-tutorialsX/f.html", "p", "/fnirs-tutorials", "<outside the site>"),
-        ("f.html", "p", "fnirs-tutorials/", "p/f.html"),
-        ("demo/", "p", "/b", "p/demo/index.html"),
-        ("a.html?x=1#y", "p", "", "p/a.html"),
-        ("#top", "p", "", None),
-        ("https://example.org/a.html", "p", "", None),
-        ("//example.org/a.html", "p", "", None),
-        ("data:text/html,x", "p", "", None),
+        ("https://example.org/live.html", True),
+        ("HTTPS://Example.org/live.html", True),
+        ("  \t\nhttps://example.org/live.html", True),
+        ("//example.org/live.html", True),
+        ("", False),
+        ("#top", False),
+        ("?x=1", False),
+        ("frames/live.html", False),
+        ("./frames/live.html", False),
+        ("../frames/live.html", False),
+        ("/frames/live.html", False),
+        ("/fnirs-tutorials/frames/live.html", False),
+        ("my%20demo.html", False),
+        ("demo/", False),
+        ("demo", False),
+        ("http://example.org/live.html", False),
+        ("https:live.html", False),
+        ("https:///live.html", False),
+        ("///live.html", False),
+        ("//", False),
+        ("data:text/html,<p>x</p>", False),
+        ("about:blank", False),
+        ("javascript:alert(1)", False),
+        ("C:\\frames\\live.html", False),
+        ("\\\\example.org\\live.html", False),
     ],
 )
-def test_the_site_path_of_a_frame_follows_the_address_a_browser_requests(
-    src: str, slug: str, base: str, expected: str | None
+def test_only_an_https_url_or_a_protocol_relative_one_is_an_external_frame(
+    src: str, expected: bool
 ) -> None:
-    assert build_book.frame_site_path(src, slug, base) == expected
+    assert build_book.frame_is_external(src) is expected
 
 
-def test_a_frame_without_its_file_stops_the_script_with_its_own_exit_code(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("stem", ["frame_relative", "frame_root_relative"])
+def test_a_local_frame_is_refused_and_named(stem: str) -> None:
+    page = load_fixture(stem)
+    problems = build_book.check_built_pages({page["location"]: page}, [], [])
+    assert len(problems) == 1
+    assert problems[0].exit_code == build_book.EXIT_FRAME_LOCAL == 18
+    message = str(problems[0])
+    source = build_book.find_frame_sources(page["mdast"])[0]
+    assert f"page {page['location']!r}" in message
+    assert f"source {source!r}" in message
+    assert "neither an https URL nor one that starts with //" in message
+    assert "does not publish the target of a frame" in message
+    assert "an empty frame" in message
+    assert "blocks an http source on a site served over HTTPS" in message
+    assert "Give the frame an https URL" in message
+
+
+def test_a_frame_whose_source_is_an_https_url_is_accepted() -> None:
+    page = load_fixture("frame_scheme")
+    assert build_book.check_built_pages({page["location"]: page}, [], []) == []
+
+
+def test_an_http_frame_is_refused() -> None:
+    page = frame_page("frame_scheme", "http://example.org/live.html")
+    problems = build_book.check_built_pages({page["location"]: page}, [], [])
+    assert [p.exit_code for p in problems] == [build_book.EXIT_FRAME_LOCAL]
+
+
+def test_every_refused_frame_of_a_page_is_reported() -> None:
+    page = load_fixture("frame_relative")
+    frame = page["mdast"]["children"][0]["children"][0]
+    page["mdast"]["children"][0]["children"].append(dict(frame, src="/other.html"))
+    problems = build_book.check_built_pages({page["location"]: page}, [], [])
+    assert len(problems) == 2
+
+
+def test_a_frame_nested_in_another_node_is_found() -> None:
+    page = load_fixture("frame_relative")
+    frame = page["mdast"]["children"][0]["children"].pop()
+    page["mdast"]["children"][0]["children"].append(
+        {"type": "admonition", "children": [{"type": "paragraph", "children": [frame]}]}
+    )
+    assert build_book.find_frame_sources(page["mdast"]) == [FRAME_SOURCE]
+
+
+def test_a_node_that_only_looks_like_a_frame_is_not_one() -> None:
+    tree = {"type": "root", "children": [{"type": "image", "src": "frames/live.html"}]}
+    assert build_book.find_frame_sources(tree) == []
+    assert build_book.find_frame_sources({"type": "iframe", "src": 3}) == []
+
+
+def test_a_local_frame_stops_the_script_with_its_own_exit_code(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.delenv("BASE_URL", raising=False)
     root = make_project(tmp_path, ["notebook_smoke", "frame_relative"])
     build = FakeBuild(["notebook_smoke", "frame_relative"])
-    assert run_main(root, build) == build_book.EXIT_FRAME_MISSING == 18
+    assert run_main(root, build) == build_book.EXIT_FRAME_LOCAL == 18
     assert "Book not built (exit 18)" in caplog.text
     assert "page '/book/frame_relative.md' holds a frame whose source" in caplog.text
 
 
-def test_a_frame_with_its_file_in_the_built_site_lets_the_script_succeed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("BASE_URL", raising=False)
-    root = make_project(tmp_path, ["notebook_smoke", "frame_relative"])
-    build = FakeBuildWithFiles(
-        ["notebook_smoke", "frame_relative"], ["frame-relative/frames/live.html"]
-    )
-    assert run_main(root, build) == 0
+def test_a_frame_with_an_https_source_lets_the_script_succeed(tmp_path: Path) -> None:
+    root = make_project(tmp_path, ["notebook_smoke", "frame_scheme"])
+    assert run_main(root, FakeBuild(["notebook_smoke", "frame_scheme"])) == 0
 
 
-def test_the_base_url_of_the_environment_decides_where_a_frame_is_looked_for(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("BASE_URL", "/fnirs-tutorials")
-    root = make_project(tmp_path, ["notebook_smoke", "frame_root_relative"])
-    build = FakeBuildWithFiles(
-        ["notebook_smoke", "frame_root_relative"], ["frames/live.html"]
-    )
-    assert run_main(root, build) == build_book.EXIT_FRAME_MISSING
-    assert "outside the site" in caplog.text
-
-
-def test_a_frame_target_is_still_staged_next_to_the_page(tmp_path: Path) -> None:
+def test_the_target_of_a_frame_is_not_staged(tmp_path: Path) -> None:
     root = make_project(
         tmp_path,
         ["notebook_smoke", "frame_relative"],
@@ -1181,4 +1112,119 @@ def test_a_frame_target_is_still_staged_next_to_the_page(tmp_path: Path) -> None
     (root / "book" / "frames").mkdir()
     (root / "book" / "frames" / "live.html").write_text("x", encoding="utf-8")
     staged = build_book.stage_book(root, root / "_build" / "executed")
-    assert (staged.stage_dir / "book" / "frames" / "live.html").is_file()
+    assert not (staged.stage_dir / "book" / "frames" / "live.html").exists()
+    assert (staged.stage_dir / "book" / "frame_relative.md").is_file()
+
+
+# --------------------------------------------------------------------------------------
+# File probes on names that come from the content of the book
+# --------------------------------------------------------------------------------------
+
+LONG_NAME = "a" * 300
+
+
+def test_a_name_the_file_system_refuses_is_not_a_file(tmp_path: Path) -> None:
+    assert build_book.is_file_or_absent(tmp_path / LONG_NAME) is False
+    assert build_book.is_file_or_absent(tmp_path / "missing.md") is False
+    present = tmp_path / "present.md"
+    present.write_text("x", encoding="utf-8")
+    assert build_book.is_file_or_absent(present) is True
+    assert build_book.is_file_or_absent(tmp_path) is False
+
+
+def test_an_entry_of_the_table_of_contents_the_file_system_refuses_is_reported_missing(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"])
+    names = ["book/no_code.md", f"book/{LONG_NAME}.md"]
+    monkeypatch.setattr(build_book, "read_toc_files", lambda _path: (names, []))
+    with caplog.at_level(logging.WARNING):
+        staged = build_book.stage_book(root, root / "_build" / "executed")
+    assert (
+        f"Page book/{LONG_NAME}.md of the table of contents does not exist"
+        in caplog.text
+    )
+    assert Path("book/no_code.md") in staged.copied
+
+
+def test_an_entry_of_the_table_of_contents_the_notebook_reader_cannot_test_exits_17(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"])
+    document = yaml.safe_load((root / "myst.yml").read_text(encoding="utf-8"))
+    document["project"]["toc"].append({"file": f"book/{LONG_NAME}.md"})
+    (root / "myst.yml").write_text(yaml.safe_dump(document), encoding="utf-8")
+    code = run_main(root, FakeBuild(["notebook_smoke", "no_code"]))
+    assert code == build_book.EXIT_FILE_ERROR == 17
+    assert "Book not built (exit 17)" in caplog.text
+    assert "OSError on " in caplog.text
+    assert LONG_NAME in caplog.text
+    assert "File name too long" in caplog.text
+
+
+def test_a_file_error_the_script_did_not_guard_exits_17_with_the_whole_error(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"])
+
+    def refuse(*_args: Any) -> None:
+        raise OSError(13, "Permission denied", "/some/file.md")
+
+    monkeypatch.setattr(build_book, "stage_book", refuse)
+    assert run_main(root, FakeBuild([])) == build_book.EXIT_FILE_ERROR
+    assert (
+        "PermissionError on /some/file.md: [Errno 13] Permission denied" in caplog.text
+    )
+
+
+# --------------------------------------------------------------------------------------
+# The workflow
+# --------------------------------------------------------------------------------------
+
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "book.yml"
+
+
+def load_workflow() -> dict[str, Any]:
+    return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+
+
+def test_only_a_push_to_main_deploys() -> None:
+    deploy = load_workflow()["jobs"]["deploy"]
+    assert (
+        deploy["if"] == "github.ref == 'refs/heads/main' && github.event_name == 'push'"
+    )
+    assert deploy["needs"] == "build"
+
+
+def test_the_runs_are_grouped_by_event_and_ref_and_main_is_never_cancelled() -> None:
+    concurrency = load_workflow()["concurrency"]
+    assert concurrency["group"] == "book-${{ github.event_name }}-${{ github.ref }}"
+    assert concurrency["cancel-in-progress"] == "${{ github.ref != 'refs/heads/main' }}"
+    assert load_workflow()["jobs"]["deploy"]["concurrency"] == {
+        "group": "pages",
+        "cancel-in-progress": False,
+    }
+
+
+def test_the_deploy_job_keeps_its_two_permissions_and_has_no_token_step() -> None:
+    deploy = load_workflow()["jobs"]["deploy"]
+    assert deploy["permissions"] == {"pages": "write", "id-token": "write"}
+    check = deploy["steps"][0]
+    assert "token" not in json.dumps(check).lower()
+
+
+def test_the_stale_run_step_comes_before_the_deploy_step_and_gates_it() -> None:
+    steps = load_workflow()["jobs"]["deploy"]["steps"]
+    ids = [step.get("id") for step in steps]
+    assert ids == ["head", "deployment"]
+    check, deploy = steps
+    assert deploy["if"] == "steps.head.outputs.current == 'true'"
+    assert deploy["uses"].startswith("actions/deploy-pages@")
+    script = check["run"]
+    assert 'git ls-remote "$REMOTE" refs/heads/main' in script
+    assert check["env"]["REMOTE"] == "${{ github.server_url }}/${{ github.repository }}"
+    assert "set -euo pipefail" in script
+    # An empty answer fails the job, and a different head only sets the output.
+    assert 'if [ -z "$head" ]; then' in script and "exit 1" in script
+    assert 'if [ "$head" = "${GITHUB_SHA}" ]' in script
+    assert script.count("current=true") == 1 and script.count("current=false") == 1
