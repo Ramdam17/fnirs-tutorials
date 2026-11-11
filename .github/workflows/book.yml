@@ -21,6 +21,15 @@ on:
 permissions:
   contents: read
 
+# One run per ref. A newer push to a branch cancels the run it supersedes; on main a run
+# in progress is never cancelled, so that a deployment is not cut short. A pull request
+# from a branch of this repository still runs once for the push and once for the pull
+# request, because the two runs have different refs (refs/heads/<branch> and
+# refs/pull/<number>/merge) and so different groups.
+concurrency:
+  group: book-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 env:
   # The site is served from a sub-folder of the account's Pages domain, so MyST needs the
   # base URL at build time. MyST reads the environment variable BASE_URL, whose value is
@@ -28,6 +37,8 @@ env:
   # https://mystmd.org/guide/deployment-github-pages, which the Jupyter Book 2 page
   # https://jupyterbook.org/stable/build-and-publish/publish links to for the GitHub Pages
   # configuration. scripts/build_book.py does not set it; its child process inherits it.
+  # The value comes from the repository name in the event payload, not from the Pages API,
+  # so the build job needs no Pages configuration step and no pages permission.
   BASE_URL: /${{ github.event.repository.name }}
 
 jobs:
@@ -60,22 +71,33 @@ jobs:
 
       # The FRESH archives are fetched from OSF by scripts/download_data.py. The key changes
       # only when that script does, since the archives, their sizes and their checksums are
-      # written in it.
+      # written in it. The cache is restored here and saved right after the download, by the
+      # two sub-actions, because the single actions/cache action saves in its post step,
+      # which runs only when the whole job succeeds: a cold run that failed later would
+      # leave nothing behind and the next run would download the archives again.
       - name: Restore the FRESH data
         id: fresh-cache
-        uses: actions/cache@v6.1.0
+        uses: actions/cache/restore@v6.1.0
         with:
           path: data/fresh
           key: fresh-${{ hashFiles('scripts/download_data.py') }}
 
+      # The output is true for an exact hit and empty when nothing was found.
       - name: Report the FRESH cache
-        run: echo "FRESH cache hit - ${{ steps.fresh-cache.outputs.cache-hit }}"
+        run: echo "FRESH cache hit - ${{ steps.fresh-cache.outputs.cache-hit || 'no exact hit' }}"
 
       - name: Install the environment
         run: uv sync --locked
 
       - name: Download the FRESH data
         run: uv run python scripts/download_data.py --data-dir data
+
+      - name: Save the FRESH data
+        if: steps.fresh-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: data/fresh
+          key: fresh-${{ hashFiles('scripts/download_data.py') }}
 
       - name: Lint
         run: uv run ruff check .
@@ -91,23 +113,20 @@ jobs:
         id: notebooks
         run: uv run python -m pytest tests/test_notebooks.py -v
 
-      # The timings file is written by the notebook step, a failed notebook included; it
-      # does not exist when an earlier step failed, so the upload is skipped then.
+      # The timings file is written by a session fixture of the notebook step, a failed
+      # notebook included. It does not exist when pytest stops before running any test, for
+      # example at collection when the table of contents is refused, so a missing file only
+      # warns here: the failure to read is the notebook step's own.
       - name: Upload the notebook timings
         if: ${{ !cancelled() && steps.notebooks.conclusion != 'skipped' }}
         uses: actions/upload-artifact@v7.0.2
         with:
           name: notebook-timings
           path: build-reports/notebook-timings.json
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Build the book from the executed notebooks
         run: uv run python scripts/build_book.py
-
-      # Only main deploys; Pages must be enabled in the repository settings for this step.
-      - name: Configure Pages
-        if: github.ref == 'refs/heads/main'
-        uses: actions/configure-pages@v6.0.0
 
       # The Pages artifact holds the HTML of the staging folder and nothing else: the
       # staging folder holds myst.yml, the pages and the executed notebooks, never data/.
@@ -128,7 +147,8 @@ jobs:
     permissions:
       pages: write
       id-token: write
-    # One deployment at a time; a running deployment is not cancelled.
+    # Pages must be enabled in the repository settings for this job. One deployment at a
+    # time; a running deployment is not cancelled.
     concurrency:
       group: pages
       cancel-in-progress: false
