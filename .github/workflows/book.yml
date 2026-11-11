@@ -167,16 +167,28 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      # A public repository answers git ls-remote without credentials, so this step needs no
-      # token and no permission. It fails when the answer is empty or the command fails: the
+      # On the first attempt of a run the step deploys without looking at the head of main:
+      # the push runs of main deploy in the order of their group, and if a newer head were
+      # skipped or failed, the commit of this run would never be deployed. A re-run of an
+      # older run is what puts older content back, so only an attempt other than the first
+      # compares its commit with the head of main (GITHUB_RUN_ATTEMPT begins at 1 and
+      # increments with each re-run, per the GitHub documentation of variables). A re-run
+      # made while pushes are queued takes the pending place of its group. The comparison
+      # needs no token and no permission, because a public repository answers git ls-remote
+      # without credentials. It fails when the answer is empty or the command fails: the
       # job never deploys on a doubt. When the commit of this run is no longer the head of
-      # main (a re-run of an older run), it deploys nothing and the job ends green.
+      # main, it deploys nothing and the job ends green.
       - name: Check that this commit is the head of main
         id: head
         env:
           REMOTE: ${{ github.server_url }}/${{ github.repository }}
         run: |
           set -euo pipefail
+          if [ "${GITHUB_RUN_ATTEMPT}" = "1" ]; then
+            echo "First attempt of this run: push runs to main deploy in the order of their group."
+            echo "current=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           head="$(git ls-remote "$REMOTE" refs/heads/main | cut -f1)"
           echo "head of main: ${head:-<empty>}"
           echo "this run:     ${GITHUB_SHA}"
