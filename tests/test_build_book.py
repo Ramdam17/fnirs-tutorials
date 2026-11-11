@@ -973,7 +973,7 @@ def test_the_maker_of_the_page_files_stops_before_writing_in_the_repository(
 
 
 # --------------------------------------------------------------------------------------
-# A frame must point to another site over https
+# Every frame is refused
 # --------------------------------------------------------------------------------------
 
 FRAME_SOURCE = "frames/live.html"
@@ -1002,70 +1002,25 @@ def test_the_fixture_pages_hold_one_frame_each_with_the_source_as_written() -> N
 
 
 @pytest.mark.parametrize(
-    ("src", "expected"),
-    [
-        ("https://example.org/live.html", True),
-        ("HTTPS://Example.org/live.html", True),
-        ("  \t\nhttps://example.org/live.html", True),
-        ("//example.org/live.html", True),
-        ("", False),
-        ("#top", False),
-        ("?x=1", False),
-        ("frames/live.html", False),
-        ("./frames/live.html", False),
-        ("../frames/live.html", False),
-        ("/frames/live.html", False),
-        ("/fnirs-tutorials/frames/live.html", False),
-        ("my%20demo.html", False),
-        ("demo/", False),
-        ("demo", False),
-        ("http://example.org/live.html", False),
-        ("https:live.html", False),
-        ("https:///live.html", False),
-        ("///live.html", False),
-        ("//", False),
-        ("data:text/html,<p>x</p>", False),
-        ("about:blank", False),
-        ("javascript:alert(1)", False),
-        ("C:\\frames\\live.html", False),
-        ("\\\\example.org\\live.html", False),
-    ],
+    "stem", ["frame_relative", "frame_root_relative", "frame_scheme"]
 )
-def test_only_an_https_url_or_a_protocol_relative_one_is_an_external_frame(
-    src: str, expected: bool
-) -> None:
-    assert build_book.frame_is_external(src) is expected
-
-
-@pytest.mark.parametrize("stem", ["frame_relative", "frame_root_relative"])
-def test_a_local_frame_is_refused_and_named(stem: str) -> None:
+def test_every_frame_is_refused_whatever_its_source_and_named(stem: str) -> None:
     page = load_fixture(stem)
     problems = build_book.check_built_pages({page["location"]: page}, [], [])
     assert len(problems) == 1
-    assert problems[0].exit_code == build_book.EXIT_FRAME_LOCAL == 18
+    assert problems[0].exit_code == build_book.EXIT_FRAME == 18
     message = str(problems[0])
     source = build_book.find_frame_sources(page["mdast"])[0]
     assert f"page {page['location']!r}" in message
-    assert f"source {source!r}" in message
-    assert "neither an https URL nor one that starts with //" in message
-    assert "does not publish the target of a frame" in message
-    assert "an empty frame" in message
-    assert "blocks an http source on a site served over HTTPS" in message
-    assert "Give the frame an https URL" in message
+    assert f"source is {source!r}" in message
+    assert "no way yet to publish the target of a frame" in message
+    assert "check that a frame shows something" in message
+    assert (
+        "every frame is refused until the rule that accepts one is written" in message
+    )
 
 
-def test_a_frame_whose_source_is_an_https_url_is_accepted() -> None:
-    page = load_fixture("frame_scheme")
-    assert build_book.check_built_pages({page["location"]: page}, [], []) == []
-
-
-def test_an_http_frame_is_refused() -> None:
-    page = frame_page("frame_scheme", "http://example.org/live.html")
-    problems = build_book.check_built_pages({page["location"]: page}, [], [])
-    assert [p.exit_code for p in problems] == [build_book.EXIT_FRAME_LOCAL]
-
-
-def test_every_refused_frame_of_a_page_is_reported() -> None:
+def test_every_frame_of_a_page_is_reported() -> None:
     page = load_fixture("frame_relative")
     frame = page["mdast"]["children"][0]["children"][0]
     page["mdast"]["children"][0]["children"].append(dict(frame, src="/other.html"))
@@ -1093,14 +1048,23 @@ def test_a_local_frame_stops_the_script_with_its_own_exit_code(
 ) -> None:
     root = make_project(tmp_path, ["notebook_smoke", "frame_relative"])
     build = FakeBuild(["notebook_smoke", "frame_relative"])
-    assert run_main(root, build) == build_book.EXIT_FRAME_LOCAL == 18
+    assert run_main(root, build) == build_book.EXIT_FRAME == 18
     assert "Book not built (exit 18)" in caplog.text
-    assert "page '/book/frame_relative.md' holds a frame whose source" in caplog.text
+    assert "page '/book/frame_relative.md' holds a frame whose source is" in caplog.text
 
 
-def test_a_frame_with_an_https_source_lets_the_script_succeed(tmp_path: Path) -> None:
+def test_a_frame_with_an_https_source_stops_the_script_too(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     root = make_project(tmp_path, ["notebook_smoke", "frame_scheme"])
-    assert run_main(root, FakeBuild(["notebook_smoke", "frame_scheme"])) == 0
+    build = FakeBuild(["notebook_smoke", "frame_scheme"])
+    assert run_main(root, build) == build_book.EXIT_FRAME
+    assert "https://example.org/live.html" in caplog.text
+
+
+def test_a_book_without_a_frame_still_builds(tmp_path: Path) -> None:
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"])
+    assert run_main(root, FakeBuild(["notebook_smoke", "no_code"])) == 0
 
 
 def test_the_target_of_a_frame_is_not_staged(tmp_path: Path) -> None:
@@ -1162,19 +1126,44 @@ def test_an_entry_of_the_table_of_contents_the_notebook_reader_cannot_test_exits
     assert "File name too long" in caplog.text
 
 
+def raise_from_staging(monkeypatch: pytest.MonkeyPatch, error: OSError) -> None:
+    def refuse(*_args: Any) -> None:
+        raise error
+
+    monkeypatch.setattr(build_book, "stage_book", refuse)
+
+
 def test_a_file_error_the_script_did_not_guard_exits_17_with_the_whole_error(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = make_project(tmp_path, ["notebook_smoke", "no_code"])
-
-    def refuse(*_args: Any) -> None:
-        raise OSError(13, "Permission denied", "/some/file.md")
-
-    monkeypatch.setattr(build_book, "stage_book", refuse)
+    raise_from_staging(monkeypatch, OSError(13, "Permission denied", "/some/file.md"))
     assert run_main(root, FakeBuild([])) == build_book.EXIT_FILE_ERROR
     assert (
         "PermissionError on /some/file.md: [Errno 13] Permission denied" in caplog.text
     )
+    assert "Traceback (most recent call last)" in caplog.text
+
+
+def test_a_file_error_without_a_file_name_does_not_print_none(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"])
+    raise_from_staging(monkeypatch, OSError("disk is full"))
+    assert run_main(root, FakeBuild([])) == build_book.EXIT_FILE_ERROR
+    assert "OSError on no named file: disk is full" in caplog.text
+    assert "None" not in caplog.text
+
+
+def test_a_file_error_with_two_file_names_prints_both(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"])
+    raise_from_staging(
+        monkeypatch, OSError(18, "Invalid cross-device link", "/a/from", None, "/b/to")
+    )
+    assert run_main(root, FakeBuild([])) == build_book.EXIT_FILE_ERROR
+    assert "OSError on /a/from and /b/to:" in caplog.text
 
 
 # --------------------------------------------------------------------------------------
@@ -1227,4 +1216,13 @@ def test_the_stale_run_step_comes_before_the_deploy_step_and_gates_it() -> None:
     # An empty answer fails the job, and a different head only sets the output.
     assert 'if [ -z "$head" ]; then' in script and "exit 1" in script
     assert 'if [ "$head" = "${GITHUB_SHA}" ]' in script
-    assert script.count("current=true") == 1 and script.count("current=false") == 1
+    assert script.count("current=false") == 1
+    # The first attempt deploys at once, before git ls-remote is asked.
+    first = script.index('if [ "${GITHUB_RUN_ATTEMPT}" = "1" ]; then')
+    assert first < script.index("git ls-remote")
+    assert script.count("current=true") == 2
+    assert (
+        script.index("current=true")
+        < script.index("exit 0")
+        < script.index("git ls-remote")
+    )

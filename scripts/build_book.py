@@ -15,10 +15,8 @@ files that MyST wrote under ``_build/site/content/``. It exits non-zero when
   because nothing executes it here, unless the page's own front matter says
   ``execute: {skip: true}``;
 * a file of the table of contents has no built page;
-* a built page holds a frame (an ``{iframe}``) whose source is not an ``https`` URL and
-  does not start with ``//``: the build does not publish the target of a frame, so a local
-  source would leave the page with an empty frame, and a browser blocks an ``http`` frame
-  on a site served over HTTPS;
+* a built page holds a frame (an ``{iframe}``), whatever its source: the book has no way
+  yet to publish the target of a frame or to check that a frame shows something;
 * the executed copy of a notebook is missing, older than its source or than the helper
   package under ``src/``, or the timings file of the notebook command does not record
   the notebook as ``passed``.
@@ -88,7 +86,7 @@ EXIT_UNREADABLE_PAGE = 14
 EXIT_NO_CONTENT = 15
 EXIT_BAD_EXECUTED_DIR = 16
 EXIT_FILE_ERROR = 17
-EXIT_FRAME_LOCAL = 18
+EXIT_FRAME = 18
 
 NOTEBOOK_SUFFIX = ".ipynb"
 # Folders of the repository that a staged page must never drag into the staging folder:
@@ -107,12 +105,6 @@ _DIRECTIVE_PATH = re.compile(
     re.MULTILINE,
 )
 _URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
-# A frame source the build accepts: an https URL, or a protocol-relative one (which a page
-# served over HTTPS loads over HTTPS). A browser ignores the case of the scheme and the
-# leading control characters and spaces, and a host must follow the slashes.
-_EXTERNAL_FRAME = re.compile(r"^(?:https:)?//[^/\\\s]", re.IGNORECASE)
-_LEADING_IGNORED = "".join(chr(code) for code in range(0x21))
-
 Runner = Callable[[Path], int]
 
 
@@ -649,7 +641,7 @@ def run_jupyter_book(stage_dir: Path) -> int:
     ``bibliography`` file of ``myst.yml``, still exit 0 under it, and so does a missing
     local page named by an ``{iframe}`` (no message at all), and an entry of the table of
     contents that does not exist; that is why :func:`stage_book` stages the files a page
-    references, :func:`check_frames` looks at the frames and :func:`check_built_pages`
+    references, :func:`check_frames` refuses the frames and :func:`check_built_pages`
     compares the table of contents with the built pages.
     A citation of a DOI that doi.org does not answer is an error of the page too: with
     doi.org unreachable, the same page exits 0 without ``--strict`` and 1 with it, so a
@@ -778,58 +770,28 @@ def find_frame_sources(mdast: Any) -> list[str]:
     return sources
 
 
-def frame_is_external(src: str) -> bool:
-    """Return True for a frame source that points to another site over HTTPS.
-
-    The build does not publish the target of a frame and no way to publish one has been
-    built and observed in a browser, so the only source it vouches for is an ``https``
-    URL, or a protocol-relative one (``//host/path``), which a page served over HTTPS
-    loads over HTTPS. Everything else is refused: a relative or root-relative path, a
-    folder, a percent-encoded name, an empty source or a fragment or query alone (they
-    name the page itself), ``http`` (a browser blocks it on a site served over HTTPS)
-    and any other scheme (``data``, ``about``, ``javascript``). The match ignores the
-    case and the leading control characters and spaces, as a browser does.
-
-    Parameters
-    ----------
-    src : str
-        Source of the frame, as recorded in the page file.
-
-    Examples
-    --------
-    >>> frame_is_external("https://example.org/live.html")
-    True
-    >>> frame_is_external("frames/live.html")
-    False
-    """
-    return _EXTERNAL_FRAME.match(src.lstrip(_LEADING_IGNORED)) is not None
-
-
 def check_frames(location: str, page: dict[str, Any]) -> list[BookError]:
-    """Refuse the frames of a built page whose source is not an external https URL.
+    """Refuse every frame of a built page, whatever its source.
 
-    MyST records the source of an ``{iframe}`` and does not copy its target into
-    ``_build/html``, and it says nothing when the target is missing, so a page would be
-    published with an empty frame and every other check green.
+    The book has no way yet to publish the target of a frame, nor to check that a frame
+    shows something, so a page with a frame would be published with a frame that may be
+    empty and every other check green. Every frame is refused until the rule that accepts
+    one is written together with that way.
 
     Returns
     -------
     list of BookError
-        One per refused frame, with ``EXIT_FRAME_LOCAL``; the message names the page and
-        the source.
+        One per frame, with ``EXIT_FRAME``; the message names the page and the source.
     """
     return [
         BookError(
-            EXIT_FRAME_LOCAL,
-            f"page {location!r} holds a frame whose source {src!r} is neither an "
-            "https URL nor one that starts with //. The build does not publish the "
-            "target of a frame, so a local source would leave the page with an empty "
-            "frame, and a browser blocks an http source on a site served over HTTPS. "
-            "Give the frame an https URL, or leave the frame out until the book can "
-            "publish its target.",
+            EXIT_FRAME,
+            f"page {location!r} holds a frame whose source is {src!r}. The book has no "
+            "way yet to publish the target of a frame or to check that a frame shows "
+            "something, so every frame is refused until the rule that accepts one is "
+            "written with that way.",
         )
         for src in find_frame_sources(page["mdast"])
-        if not frame_is_external(src)
     ]
 
 
@@ -978,15 +940,16 @@ def main(argv: Sequence[str] | None = None, runner: Runner = run_jupyter_book) -
         logger.error("Book not built (exit %d): %s", error.exit_code, error)
         return error.exit_code
     except OSError as error:
-        # A file operation the script did not guard: report it with the file name, the
-        # whole text of the error and its own exit code, which is not the exit code of a
-        # failed build.
-        logger.error(
+        # A file operation the script did not guard: report the whole text of the error,
+        # each file name that is set, and the traceback, with its own exit code, which is
+        # not the exit code of a failed build.
+        names = [name for name in (error.filename, error.filename2) if name is not None]
+        logger.exception(
             "Book not built (exit %d): %s on %s: %s",
             EXIT_FILE_ERROR,
             type(error).__name__,
-            error.filename,
-            error,
+            " and ".join(str(name) for name in names) or "no named file",
+            error,  # noqa: TRY401 - the first line must carry the error text
         )
         return EXIT_FILE_ERROR
     logger.info(
