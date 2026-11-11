@@ -16,7 +16,12 @@ book/_build/
 # Log written by snirf.validateSnirf in the working directory
 pysnirf2.log
 
-# sprint-forge working folder of the open sprint
+# Working documents of the project, kept local and never published: project rules,
+# specification, plans, notes and measurement files.
+CLAUDE.md
+__docs/
+docs/
+config/sprint-forge.yaml
 .sprint-forge/
 
 # Page snapshots written at the repository root by the browser tool used to screenshot the built site

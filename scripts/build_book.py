@@ -17,8 +17,7 @@ files that MyST wrote under ``_build/site/content/``. It exits non-zero when
 
 The check reads MyST's own parse, so it sees a ``{code-cell}`` brought in by an
 ``{include}`` or opened inside a blockquote, a list item, an admonition or a tab, which
-the textual guard of ``tests/notebook_runner.py`` lets through. See
-``docs/measures/s01-book-foundations-built-page-check.md``.
+the textual guard of ``tests/notebook_runner.py`` lets through.
 
 When to use
 -----------

@@ -227,8 +227,8 @@ def _refuse_executable_markdown(page: Path, where: str) -> None:
       runs at line 307877, before the execution step at line 307880), and a directive
       opened inside a blockquote or a list item, which the pattern does not allow before
       the fence. Both were read in the bundle and not built. The detection is an early
-      guard; the exact check reads the pages that MyST built and belongs with the build
-      of the book (Task 5).
+      guard; the exact check reads the pages that MyST built and is made by
+      ``scripts/build_book.py``.
 
     Such a page is accepted only if its author excluded it with ``execute: {skip:
     true}`` or the deprecated ``skip_execution: true`` (lines 207880 to 207886; see

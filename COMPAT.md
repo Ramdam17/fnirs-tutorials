@@ -49,7 +49,7 @@ With both overrides, Cedalion's own test suite at tag `v26.5.1` gives 302 passed
 
 ## Cedalion API renames, 25.x to 26.5
 
-Every API name used in the brief was resolved by introspection on the installed 26.5.1 package. The names below changed between 25.1.0 and 26.5.1. Notebooks use the new names.
+Every API name the series uses was resolved by introspection on the installed 26.5.1 package. The names below changed between 25.1.0 and 26.5.1. Notebooks use the new names.
 
 | 25.x | 26.5.1 |
 |---|---|

@@ -9,7 +9,7 @@ project:
   description: Onboarding tutorial series on fNIRS analysis in Python, from photons to group statistics.
   authors:
     - name: Rémy Ramadour
-  # The repository does not exist yet; it is created by Sprint 1, Task 5.
+  # Public repository of the book.
   github: Ramdam17/fnirs-tutorials
   # Explicit table of contents: only the pages listed here belong to the book.
   toc:

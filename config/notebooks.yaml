@@ -1,8 +1,8 @@
 # Execution timeouts of the notebooks of the book, read by tests/notebook_runner.py.
 #
 # A timeout bounds the whole notebook, not one cell: the runner gives each cell the time
-# that remains of the notebook's budget. 300 s is the heuristic threshold of the sprint
-# plan (the specification says "a few minutes"), not a published standard.
+# that remains of the notebook's budget. 300 s is a heuristic threshold
+# (every notebook must execute "in a few minutes"), not a published standard.
 default_timeout_s: 300
 
 # Per-notebook overrides, in seconds, keyed by the notebook's path relative to the

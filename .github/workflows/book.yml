@@ -1,4 +1,4 @@
-# Build, execute and deploy the book (sprint S01, Task 5).
+# Build, execute and deploy the book.
 #
 # The notebooks are executed headless by pytest (tests/test_notebooks.py), which writes
 # the executed copies under _build/executed/. scripts/build_book.py then builds the site
@@ -60,7 +60,7 @@ jobs:
 
       # The FRESH archives are fetched from OSF by scripts/download_data.py. The key changes
       # only when that script does, since the archives, their sizes and their checksums are
-      # written in it (Decision 3 of the sprint plan).
+      # written in it.
       - name: Restore the FRESH data
         id: fresh-cache
         uses: actions/cache@v6.1.0

@@ -6,8 +6,8 @@ is a parameter (``runner``): the tests give it a stand-in that writes page files
 
 The page files under ``tests/fixtures/built_pages/`` are real files written by MyST, not
 written by hand: jupyter-book 2.1.7 (myst-cli 1.11.0) built them on 2026-11-11 in one
-scratch project, made by ``docs/measures/s01-book-foundations-built-page-check-records.py
---export-fixtures``, from the sources named by the file names, for example
+scratch project that holds one page per case, from the sources named by the file names,
+for example
 ``code_cell.json`` comes from a markdown page that holds one ``{code-cell}`` and
 ``notebook_smoke.json`` from the executed smoke notebook of the book. They are small, so
 none is trimmed. Each keeps the ``location`` MyST gave it, ``/book/<stem>.md`` or
