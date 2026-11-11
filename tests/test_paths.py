@@ -54,7 +54,9 @@ def test_repo_root_holds_marker(fake_repo: Path) -> None:
 
 
 def test_data_dir_without_marker_names_variable(no_marker: None) -> None:
-    with pytest.raises(paths.RepoRootNotFoundError, match="FNIRS_DATA_DIR"):
+    with pytest.raises(
+        paths.RepoRootNotFoundError, match=r"^FNIRS_DATA_DIR is not set"
+    ):
         paths.data_dir()
 
 
@@ -71,7 +73,9 @@ def test_cache_dir_default(fake_repo: Path) -> None:
 
 
 def test_cache_dir_without_marker_names_variable(no_marker: None) -> None:
-    with pytest.raises(paths.RepoRootNotFoundError, match="FNIRS_CACHE_DIR"):
+    with pytest.raises(
+        paths.RepoRootNotFoundError, match=r"^FNIRS_CACHE_DIR is not set"
+    ):
         paths.cache_dir()
 
 
@@ -80,3 +84,66 @@ def test_empty_variable_is_treated_as_unset(
 ) -> None:
     monkeypatch.setenv(paths.DATA_DIR_ENV, "")
     assert paths.data_dir() == fake_repo / "data"
+
+
+def test_tilde_is_expanded(
+    fake_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv(paths.DATA_DIR_ENV, "~/x")
+    assert paths.data_dir() == tmp_path / "home" / "x"
+
+
+def test_whitespace_only_variable_is_treated_as_unset(
+    fake_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(paths.DATA_DIR_ENV, "   ")
+    assert paths.data_dir() == fake_repo / "data"
+
+
+def test_surrounding_whitespace_is_stripped(
+    fake_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "padded"
+    monkeypatch.setenv(paths.DATA_DIR_ENV, f"  {target}\n")
+    assert paths.data_dir() == target
+
+
+@pytest.mark.parametrize(
+    ("variable", "function"),
+    [
+        (paths.DATA_DIR_ENV, paths.data_dir),
+        (paths.CACHE_DIR_ENV, paths.cache_dir),
+    ],
+)
+def test_relative_variable_is_rejected(
+    fake_repo: Path, monkeypatch: pytest.MonkeyPatch, variable: str, function
+) -> None:
+    monkeypatch.setenv(variable, "relative/dir")
+    with pytest.raises(ValueError, match=variable):
+        function()
+
+
+def test_marker_of_an_enclosing_project_is_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    site = (
+        project / ".venv" / "lib" / "python3.12" / "site-packages" / "fnirs_tutorials"
+    )
+    site.mkdir(parents=True)
+    (project / paths.ROOT_MARKER).write_text("version: 1\n")
+    monkeypatch.setattr(paths, "_ANCHOR", site / "paths.py")
+    with pytest.raises(paths.RepoRootNotFoundError):
+        paths.repo_root()
+
+
+def test_marker_two_levels_up_without_src_folder_is_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = tmp_path / "project" / "lib" / "fnirs_tutorials"
+    package.mkdir(parents=True)
+    (tmp_path / "project" / paths.ROOT_MARKER).write_text("version: 1\n")
+    monkeypatch.setattr(paths, "_ANCHOR", package / "paths.py")
+    with pytest.raises(paths.RepoRootNotFoundError):
+        paths.repo_root()
