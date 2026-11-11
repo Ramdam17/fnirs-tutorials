@@ -15,6 +15,8 @@ files that MyST wrote under ``_build/site/content/``. It exits non-zero when
   because nothing executes it here, unless the page's own front matter says
   ``execute: {skip: true}``;
 * a file of the table of contents has no built page;
+* a built page holds a frame (an ``{iframe}``) whose source is a local path and whose file
+  is not at the place a browser would request it in the built site;
 * the executed copy of a notebook is missing, older than its source or than the helper
   package under ``src/``, or the timings file of the notebook command does not record
   the notebook as ``passed``.
@@ -47,6 +49,7 @@ import argparse
 import json
 import logging
 import os
+import posixpath
 import re
 import shutil
 import subprocess
@@ -84,6 +87,7 @@ EXIT_UNREADABLE_PAGE = 14
 EXIT_NO_CONTENT = 15
 EXIT_BAD_EXECUTED_DIR = 16
 EXIT_FILE_ERROR = 17
+EXIT_FRAME_MISSING = 18
 
 NOTEBOOK_SUFFIX = ".ipynb"
 # Folders of the repository that a staged page must never drag into the staging folder:
@@ -102,6 +106,8 @@ _DIRECTIVE_PATH = re.compile(
     re.MULTILINE,
 )
 _URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+# Stands for a frame request that leaves the built site, in :func:`frame_site_path`.
+_OUTSIDE_SITE = "<outside the site>"
 
 Runner = Callable[[Path], int]
 
@@ -364,7 +370,14 @@ def _local_target(raw: str, page: Path, root: Path) -> Path | None:
     except ValueError:
         logger.warning("%s: reference %r points outside the repository", page, raw)
         return None
-    return candidate if candidate.is_file() else None
+    try:
+        return candidate if candidate.is_file() else None
+    except OSError:
+        # Every string of myst.yml comes here, prose included. Python 3.12 lets
+        # Path.is_file() raise for a name the file system refuses (ENAMETOOLONG, for a
+        # description of more than 255 bytes before its first slash); such a string is
+        # not a file.
+        return None
 
 
 def _page_text(path: Path) -> str:
@@ -614,12 +627,17 @@ def stage_book(root: Path, executed_dir: Path) -> StagedBook:
 def run_jupyter_book(stage_dir: Path) -> int:
     """Run ``jupyter book build --html --strict`` in the staging folder, without ``--execute``.
 
-    ``--strict`` makes the build exit non-zero on a warning. Measured with jupyter-book
-    2.1.7 (myst-cli 1.11.0): without it a missing image and a missing ``{include}`` are
-    reported and the build exits 0, with it both exit 1, and the book itself builds with
-    exit 0. It does not catch a missing local page named by an ``{iframe}`` (no message
-    at all) or a missing ``bibliography`` file of ``myst.yml`` (a warning that exit 0
-    survives), which is why :func:`stage_book` stages those files.
+    ``--strict`` makes the build stop, with a non-zero exit, on an error that MyST reports
+    on a page. Measured with jupyter-book 2.1.7 (myst-cli 1.11.0): without it a missing
+    image and a missing ``{include}`` are reported and the build exits 0, with it both
+    exit 1 ("Site has 2 errors and 0 warning, stopping build"), and the book itself builds
+    with exit 0. Two warnings that were measured, the theme's ignored option and a missing
+    ``bibliography`` file of ``myst.yml``, still exit 0 under it, and so does a missing
+    local page named by an ``{iframe}`` (no message at all); that is why
+    :func:`stage_book` stages those files and :func:`check_frames` looks for the frames.
+    A citation of a DOI that doi.org does not answer is an error of the page too: with
+    doi.org unreachable, the same page exits 0 without ``--strict`` and 1 with it, so a
+    network failure outside the repository can fail the build.
 
     The command is run through the interpreter of this script, so that it uses the same
     environment. Its output goes to the console unchanged. The environment, ``BASE_URL``
@@ -674,10 +692,12 @@ def _skipped_by_author(page: dict[str, Any]) -> bool:
     """Return True when the page's recorded front matter says ``execute.skip: true``.
 
     MyST records the deprecated ``skip_execution`` and the string ``'true'`` as
-    ``execute: {skip: true}`` too, so one key is read. An ``execute: {skip: true}`` set
-    under ``project:`` in ``myst.yml`` is not copied into the page's recorded front
-    matter, so it never excuses a page here. Both facts were measured with jupyter-book
-    2.1.7 (myst-cli 1.11.0).
+    ``execute: {skip: true}`` too, so one key is read. Written under ``project:`` in
+    ``myst.yml``, ``execute: {skip: true}`` is not accepted by MyST 2.1.7: the build answers
+    "'config.project' extra key ignored: execute" and the page records no ``execute``, so
+    there is nothing to inherit and the key never excuses a page here. Both facts were
+    measured with jupyter-book 2.1.7 (myst-cli 1.11.0), and the second only for that
+    spelling.
     """
     execute = page.get("frontmatter", {}).get("execute")
     return isinstance(execute, dict) and execute.get("skip") is True
@@ -715,8 +735,124 @@ def read_built_pages(content_dir: Path) -> dict[str, dict[str, Any]]:
     return pages
 
 
+def find_frame_sources(mdast: Any) -> list[str]:
+    """Return the ``src`` of every ``iframe`` node of a MyST syntax tree.
+
+    Parameters
+    ----------
+    mdast : Any
+        The ``mdast`` value of a page file, a tree of dicts and lists.
+
+    Returns
+    -------
+    list of str
+        The source of each frame as written in the page, in no particular order. MyST records it unchanged: a
+        relative path stays relative and a root-relative path does not gain the base URL.
+    """
+    sources: list[str] = []
+    stack = [mdast]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            if node.get("type") == "iframe" and isinstance(node.get("src"), str):
+                sources.append(node["src"])
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return sources
+
+
+def frame_site_path(src: str, slug: str, base_url: str) -> str | None:
+    """Return where a browser would request a local frame, relative to the built site.
+
+    The built site puts a page at ``<base>/<slug>/`` (the page with the slug ``index`` at
+    ``<base>/``), and the host redirects the address without the final slash to the one
+    with it. A relative source is resolved from that address, and a root-relative source
+    from the host root, so it belongs to the site only if it starts with the base URL.
+    MyST writes the source into the HTML as it is in the page.
+
+    Parameters
+    ----------
+    src : str
+        Source of the frame, as recorded in the page file.
+    slug : str
+        ``slug`` of the page file.
+    base_url : str
+        The base URL of the site, for example ``/fnirs-tutorials``; empty for a site at
+        the root of its host.
+
+    Returns
+    -------
+    str or None
+        POSIX path under the built site, or None when the source is not local (it has a
+        scheme or starts with ``//``) or when the request leaves the site.
+    """
+    target = src.split("#", 1)[0].split("?", 1)[0]
+    if not target or _URL_SCHEME.match(target) or target.startswith("//"):
+        return None
+    base = "/" + base_url.strip("/") if base_url.strip("/") else ""
+    if target.startswith("/"):
+        full = target
+    else:
+        page_dir = "" if slug == "index" else slug
+        full = posixpath.join(base or "/", page_dir, target)
+    # A browser cannot go above the root of the host, and normpath clamps there too.
+    normal = posixpath.normpath(full)
+    if base and normal != base and not normal.startswith(base + "/"):
+        return _OUTSIDE_SITE
+    relative = normal[len(base) :].strip("/")
+    if target.endswith("/") or not relative:
+        relative = posixpath.join(relative, "index.html")
+    return relative
+
+
+def check_frames(
+    location: str, page: dict[str, Any], html_dir: Path, base_url: str
+) -> list[BookError]:
+    """Refuse the local frames of a built page whose file is not in the built site.
+
+    MyST records the source of an ``{iframe}`` and does not copy its target into
+    ``_build/html``, and it says nothing when the target is missing, so a page would be
+    published with an empty frame and every other check green.
+
+    Returns
+    -------
+    list of BookError
+        One per frame whose source is local and whose file is absent, with
+        ``EXIT_FRAME_MISSING``; the message names the page, the source and the place
+        looked at.
+    """
+    problems: list[BookError] = []
+    for src in find_frame_sources(page["mdast"]):
+        relative = frame_site_path(src, str(page.get("slug", "")), base_url)
+        if relative is None:
+            continue
+        if (html_dir / relative).is_file():
+            continue
+        place = (
+            "outside the site"
+            if relative == _OUTSIDE_SITE
+            else f"{HTML_SUBDIR.as_posix()}/{relative}"
+        )
+        problems.append(
+            BookError(
+                EXIT_FRAME_MISSING,
+                f"page {location!r} holds a frame whose source {src!r} is a local file, "
+                f"and a browser would request it {place}, where there is no such file. "
+                "The build does not copy the target of a frame into the site, so the "
+                "page would be published with an empty frame. Put the file in the built "
+                "site, or give the frame a URL with a scheme.",
+            )
+        )
+    return problems
+
+
 def check_built_pages(
-    pages: dict[str, dict[str, Any]], toc_files: list[str], notebooks: list[str]
+    pages: dict[str, dict[str, Any]],
+    toc_files: list[str],
+    notebooks: list[str],
+    html_dir: Path,
+    base_url: str = "",
 ) -> list[BookError]:
     """Check the pages MyST built against the table of contents.
 
@@ -728,13 +864,18 @@ def check_built_pages(
         ``file:`` entries of the table of contents.
     notebooks : list of str
         The entries of ``toc_files`` that are notebooks.
+    html_dir : Path
+        The built site, ``_build/html`` of the staging folder, where the files of local
+        frames are looked for.
+    base_url : str, optional
+        The base URL of the site, empty for a site at the root of its host.
 
     Returns
     -------
     list of BookError
         One per problem, empty when the pages are accepted: a page that is not a
-        notebook and holds code to execute, and a file of the table of contents with
-        no built page.
+        notebook and holds code to execute, a local frame whose file is not in the
+        built site, and a file of the table of contents with no built page.
     """
     problems: list[BookError] = []
     for location, page in sorted(pages.items()):
@@ -757,6 +898,8 @@ def check_built_pages(
                 "'execute: {skip: true}' in its front matter.",
             )
         )
+    for location, page in sorted(pages.items()):
+        problems.extend(check_frames(location, page, html_dir, base_url))
     for name in toc_files:
         if f"/{name}" not in pages:
             kind = "notebook" if name in notebooks else "page"
@@ -796,12 +939,20 @@ def build_book(root: Path, executed_dir: Path, runner: Runner) -> StagedBook:
         raise BookError(
             code,
             f"the book build exited with code {code} in {staged.stage_dir}; "
-            "the book is not built. The build runs with --strict, so a warning above "
-            "fails it too.",
+            "the book is not built. The build runs with --strict, so an error that MyST "
+            "reports on a page stops it. A diagnostic about a DOI or another network "
+            "lookup can come from outside the repository: run the build a second time "
+            "to tell a lookup that failed once from a defect of the book.",
         )
     pages = read_built_pages(staged.stage_dir / CONTENT_SUBDIR)
     logger.info("Checking %d built pages: %s", len(pages), ", ".join(sorted(pages)))
-    problems = check_built_pages(pages, staged.toc_files, staged.notebooks)
+    problems = check_built_pages(
+        pages,
+        staged.toc_files,
+        staged.notebooks,
+        staged.stage_dir / HTML_SUBDIR,
+        os.environ.get("BASE_URL", ""),
+    )
     for problem in problems:
         logger.error("%s", problem)
     if problems:

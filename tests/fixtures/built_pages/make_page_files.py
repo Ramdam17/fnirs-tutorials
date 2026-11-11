@@ -14,6 +14,10 @@ The facts the files record, measured with jupyter-book 2.1.7 (myst-cli 1.11.0):
   written (directly, from an ``{include}``, in a blockquote, a list item, an admonition or
   a tab item), and an ``{eval}`` role becomes an ``inlineExpression`` node;
 * a fenced block that only shows the syntax of a ``{code-cell}`` gives no such node;
+* an ``{iframe}`` becomes a node of type ``iframe`` whose ``src`` is the source as
+  written, a relative path unchanged and a root-relative path without the base URL; the
+  built HTML carries the same ``src``, MyST does not copy the target into
+  ``_build/html``, and it says nothing when the target is missing;
 * ``execute: {skip: true}`` in a page's front matter is recorded in the page file as
   ``frontmatter.execute.skip`` equal to true, and so are the deprecated
   ``skip_execution: true`` and the string ``'true'``.
@@ -87,9 +91,18 @@ PAGES: dict[str, str] = {
     "legacy_skip": "---\nskip_execution: true\n---\n# Legacy skip\n\n" + CODE_CELL,
     "string_skip": "---\nexecute:\n  skip: 'true'\n---\n# String skip\n\n" + CODE_CELL,
     "literal_block": ("# Literal block\n\n````markdown\n" + CODE_CELL + "````\n"),
+    "frame_relative": "# Frame\n\n:::{iframe} frames/live.html\n:::\n",
+    "frame_root_relative": "# Frame\n\n:::{iframe} /frames/live.html\n:::\n",
+    "frame_scheme": "# Frame\n\n:::{iframe} https://example.org/live.html\n:::\n",
 }
 # Pulled in by include_case; not in the table of contents.
 INCLUDED = {"included_cell": CODE_CELL}
+
+
+def is_inside_repository(folder: Path) -> bool:
+    """Return True when ``folder`` is the repository root or lies inside it."""
+    resolved = folder.resolve()
+    return resolved == REPO or REPO in resolved.parents
 
 
 def write_project(scratch: Path, notebook: Path) -> dict[str, str]:
@@ -173,7 +186,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, default=OUTPUT)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    if REPO in args.scratch.resolve().parents:
+    if is_inside_repository(args.scratch):
         parser.error("--scratch must be outside the repository tree")
     if not args.notebook.is_file():
         parser.error(f"run the notebook command first: {args.notebook} does not exist")
