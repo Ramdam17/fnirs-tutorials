@@ -8,6 +8,8 @@ The two fixtures run in a real kernel and write to temporary folders, never to
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import nbformat
@@ -24,11 +26,15 @@ from notebook_runner import (
     load_timeouts,
     record_result,
     remaining_cell_timeout,
+    remove_executed_notebooks,
     reset_timings,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
 FIXTURE_TIMEOUT_S = 2.0
+# Budget of the fixtures that must not time out: kernel start-up counts against the
+# budget, so a tight one could leave the raising cell with the floor on a slow runner.
+FIXTURE_ERROR_TIMEOUT_S = 60.0
 # The sleeping fixture sleeps 60 s; far below that proves the timeout cut it short.
 SLEEPING_MAX_WALL_S = 30.0
 
@@ -47,7 +53,7 @@ def test_failing_notebook_is_reported_as_error(tmp_path: Path) -> None:
     result = execute_notebook(
         FIXTURES / "failing.ipynb",
         tmp_path / "out" / "failing.ipynb",
-        FIXTURE_TIMEOUT_S,
+        FIXTURE_ERROR_TIMEOUT_S,
     )
     timings = tmp_path / "timings.json"
     record_result(timings, "tests/fixtures/failing.ipynb", result)
@@ -58,7 +64,7 @@ def test_failing_notebook_is_reported_as_error(tmp_path: Path) -> None:
     entry = recorded["tests/fixtures/failing.ipynb"]
     assert entry["status"] == STATUS_ERROR
     assert entry["wall_time_s"] == pytest.approx(result.wall_time_s)
-    assert entry["timeout_s"] == FIXTURE_TIMEOUT_S
+    assert entry["timeout_s"] == FIXTURE_ERROR_TIMEOUT_S
     assert (tmp_path / "out" / "failing.ipynb").is_file()
 
 
@@ -85,7 +91,7 @@ def test_source_notebook_is_never_written(tmp_path: Path) -> None:
     """Executing a fixture leaves the source file byte for byte unchanged."""
     source = FIXTURES / "failing.ipynb"
     before = source.read_bytes()
-    execute_notebook(source, tmp_path / "failing.ipynb", FIXTURE_TIMEOUT_S)
+    execute_notebook(source, tmp_path / "failing.ipynb", FIXTURE_ERROR_TIMEOUT_S)
     assert source.read_bytes() == before
 
 
@@ -105,13 +111,16 @@ def _notebook(path: Path, sources: list[str]) -> Path:
 def test_total_wall_time_over_budget_is_a_timeout(tmp_path: Path) -> None:
     """Cells that each fit their own limit but together overrun the budget time out.
 
-    Each cell sleeps 0.6 s and always receives at least one second, so no cell times
-    out; the four of them, with the kernel start-up, exceed a budget of two seconds.
+    The floor of the time given to a cell is raised to 30 s and each cell sleeps 1 s,
+    so every cell has a margin of 29 s and cannot time out, however slow the machine.
+    The four cells take at least 4 s, which exceeds the budget of 2 s for certain.
     """
     source = _notebook(
-        tmp_path / "slow_total.ipynb", ["import time\ntime.sleep(0.6)"] * 4
+        tmp_path / "slow_total.ipynb", ["import time\ntime.sleep(1.0)"] * 4
     )
-    result = execute_notebook(source, tmp_path / "out" / "slow_total.ipynb", 2.0)
+    result = execute_notebook(
+        source, tmp_path / "out" / "slow_total.ipynb", 2.0, min_cell_timeout_s=30.0
+    )
 
     assert result.status == STATUS_TIMEOUT
     assert result.error is not None and "exceeds the budget" in result.error
@@ -194,8 +203,37 @@ def test_toc_refuses_a_missing_notebook(tmp_path: Path) -> None:
 
 def test_toc_refuses_a_file_entry_without_extension(tmp_path: Path) -> None:
     myst = _project(tmp_path, "    - file: page\n", [])
-    with pytest.raises(ValueError, match="no extension"):
+    with pytest.raises(ValueError, match="explicit extension"):
         list_notebooks(myst)
+
+
+def test_toc_refuses_a_stem_that_only_looks_like_it_has_an_extension(
+    tmp_path: Path,
+) -> None:
+    """``06.1_intro`` has the suffix ``.1_intro``; MyST would resolve it on disk."""
+    myst = _project(tmp_path, "    - file: book/m06/06.1_intro\n", [])
+    with pytest.raises(ValueError, match="explicit extension"):
+        list_notebooks(myst)
+
+
+def test_toc_treats_an_upper_case_extension_as_a_notebook(tmp_path: Path) -> None:
+    myst = _project(tmp_path, "    - file: Upper.IPYNB\n", ["Upper.IPYNB"])
+    assert list_notebooks(myst) == ["Upper.IPYNB"]
+
+
+def test_toc_refuses_a_markdown_page_with_a_kernelspec(tmp_path: Path) -> None:
+    """A MyST build executes such a page; this runner would not."""
+    page = "---\nkernelspec:\n  name: python3\n---\n\n# Title\n"
+    myst = _project(tmp_path, "    - file: executable.md\n", [])
+    _write(tmp_path / "executable.md", page)
+    with pytest.raises(ValueError, match="kernelspec"):
+        list_notebooks(myst)
+
+
+def test_toc_accepts_a_markdown_page_with_other_front_matter(tmp_path: Path) -> None:
+    myst = _project(tmp_path, "    - file: plain.md\n", [])
+    _write(tmp_path / "plain.md", "---\ntitle: Plain\n---\n\n# Title\n")
+    assert list_notebooks(myst) == []
 
 
 def test_toc_missing_is_an_error(tmp_path: Path) -> None:
@@ -238,6 +276,22 @@ def test_non_positive_default_is_refused(tmp_path: Path, bad: str) -> None:
         load_timeouts(config, [])
 
 
+@pytest.mark.parametrize("bad", [".nan", ".inf", "-.inf"])
+def test_non_finite_default_is_refused(tmp_path: Path, bad: str) -> None:
+    config = _write(tmp_path / "c.yaml", f"default_timeout_s: {bad}\ntimeouts: {{}}\n")
+    with pytest.raises(ValueError, match="default_timeout_s"):
+        load_timeouts(config, [])
+
+
+@pytest.mark.parametrize("bad", [".nan", ".inf"])
+def test_non_finite_notebook_timeout_is_refused(tmp_path: Path, bad: str) -> None:
+    config = _write(
+        tmp_path / "c.yaml", f"default_timeout_s: 300\ntimeouts:\n  a.ipynb: {bad}\n"
+    )
+    with pytest.raises(ValueError, match="a.ipynb"):
+        load_timeouts(config, ["a.ipynb"])
+
+
 def test_real_configuration_matches_the_real_table_of_contents() -> None:
     """The committed configuration only names notebooks of the committed book."""
     root = Path(__file__).resolve().parents[1]
@@ -262,8 +316,98 @@ def test_timings_are_written_for_a_pass_and_for_a_failure(tmp_path: Path) -> Non
     assert recorded["b.ipynb"]["error"] == "boom"
 
 
+def test_removal_deletes_executed_notebooks_and_keeps_other_files(
+    tmp_path: Path,
+) -> None:
+    folder = tmp_path / "executed"
+    _write(folder / "book" / "a.ipynb", "{}")
+    _write(folder / "b.ipynb", "{}")
+    _write(folder / "book" / "page.md", "# page")
+    _write(folder / "_build" / "templates" / "theme.js", "x")
+
+    removed = remove_executed_notebooks(folder)
+
+    assert len(removed) == 2
+    assert not list(folder.rglob("*.ipynb"))
+    assert (folder / "book" / "page.md").is_file()
+    assert (folder / "_build" / "templates" / "theme.js").is_file()
+    assert remove_executed_notebooks(tmp_path / "absent") == []
+
+
 def test_reset_empties_the_timings_file(tmp_path: Path) -> None:
     timings = tmp_path / "timings.json"
     record_result(timings, "a.ipynb", NotebookResult(STATUS_PASSED, 1.0, 300.0))
     reset_timings(timings)
     assert json.loads(timings.read_text(encoding="utf-8")) == {}
+
+
+# --- The command itself, in a subprocess ----------------------------------------------
+
+
+def _run_command_in_temporary_repository(
+    tmp_path: Path, fixture: str, timeouts: str
+) -> tuple[int, dict[str, dict[str, object]]]:
+    """Run ``pytest tests/test_notebooks.py`` in a repository that lists one fixture.
+
+    The repository holds a ``myst.yml`` whose table of contents lists a copy of the
+    fixture, a ``config/notebooks.yaml``, and copies of the real ``test_notebooks.py``
+    and ``notebook_runner.py``. ``test_notebooks.py`` finds its repository from its own
+    location, so the copy runs against this temporary one.
+
+    Returns
+    -------
+    tuple
+        The exit code of the command and the content of its timings file.
+    """
+    repo = tmp_path / "repo"
+    notebook = f"book/{fixture}"
+    _write(repo / "myst.yml", f"version: 1\nproject:\n  toc:\n    - file: {notebook}\n")
+    _write(
+        repo / "config" / "notebooks.yaml",
+        f"default_timeout_s: 300\ntimeouts:\n{timeouts}",
+    )
+    (repo / "book").mkdir(parents=True)
+    (repo / notebook).write_bytes((FIXTURES / fixture).read_bytes())
+    (repo / "tests").mkdir()
+    for name in ("test_notebooks.py", "notebook_runner.py"):
+        (repo / "tests" / name).write_bytes((FIXTURES.parent / name).read_bytes())
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/test_notebooks.py",
+            "-p",
+            "no:cacheprovider",
+        ],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    sys.stdout.write(completed.stdout[-1500:])
+    timings = json.loads(
+        (repo / "build-reports" / "notebook-timings.json").read_text(encoding="utf-8")
+    )
+    return completed.returncode, timings
+
+
+def test_command_exits_non_zero_when_a_notebook_raises(tmp_path: Path) -> None:
+    """The documented command fails, and records an ``error``, for a failing notebook."""
+    code, timings = _run_command_in_temporary_repository(
+        tmp_path, "failing.ipynb", " {}\n"
+    )
+
+    assert code != 0
+    assert timings["book/failing.ipynb"]["status"] == STATUS_ERROR
+
+
+def test_command_exits_non_zero_when_a_notebook_overruns(tmp_path: Path) -> None:
+    """The documented command fails, and records a ``timeout``, under a 2 s timeout."""
+    code, timings = _run_command_in_temporary_repository(
+        tmp_path, "sleeping.ipynb", "  book/sleeping.ipynb: 2\n"
+    )
+
+    assert code != 0
+    assert timings["book/sleeping.ipynb"]["status"] == STATUS_TIMEOUT

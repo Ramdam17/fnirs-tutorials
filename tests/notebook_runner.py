@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -51,6 +52,7 @@ __all__ = [
     "load_timeouts",
     "record_result",
     "remaining_cell_timeout",
+    "remove_executed_notebooks",
     "reset_timings",
 ]
 
@@ -83,6 +85,12 @@ _TOC_ENTRY_KEYS = frozenset(
     }
 )
 _NOTEBOOK_SUFFIX = ".ipynb"
+_MARKDOWN_SUFFIX = ".md"
+# Extensions that MyST accepts for a ``file:`` entry (``VALID_FILE_EXTENSIONS`` in the
+# bundle of jupyter-book 2.1.7, compared in lower case). MyST also completes a missing
+# extension by probing the disk; this runner refuses such an entry instead, so that a
+# notebook is never skipped because its extension was left out.
+_VALID_SUFFIXES = (_MARKDOWN_SUFFIX, _NOTEBOOK_SUFFIX, ".tex", ".myst.json")
 
 
 @dataclass(frozen=True)
@@ -139,7 +147,42 @@ class TimeoutConfig:
         return self.timeouts.get(notebook, self.default_timeout_s)
 
 
-def _collect_notebooks(entries: Any, where: str, found: list[str]) -> None:
+def _refuse_executable_markdown(page: Path, where: str) -> None:
+    """Refuse a markdown page whose front matter declares a ``kernelspec``.
+
+    A MyST build with ``--execute`` runs such a page like a notebook, whereas this
+    runner only lists ``.ipynb`` files, so the page would be published unexecuted.
+
+    Parameters
+    ----------
+    page : Path
+        Markdown page. A page that does not exist is left to the MyST build to report.
+    where : str
+        Human-readable location of the entry, used in the error message.
+
+    Raises
+    ------
+    ValueError
+        If the YAML front matter of the page has a ``kernelspec`` key.
+    """
+    if not page.is_file():
+        return
+    text = page.read_text(encoding="utf-8")
+    if not text.startswith("---"):
+        return
+    parts = text.split("\n---", 1)
+    if len(parts) < 2:
+        return
+    front_matter = yaml.safe_load(parts[0][3:]) or {}
+    if isinstance(front_matter, dict) and "kernelspec" in front_matter:
+        raise ValueError(
+            f"{where}: markdown page {page.name!r} declares a kernelspec, so a MyST "
+            "build would execute it, and this runner would not. Convert it to a "
+            "notebook or remove the kernelspec."
+        )
+
+
+def _collect_notebooks(entries: Any, where: str, root: Path, found: list[str]) -> None:
     """Append the notebooks named in a list of table-of-contents entries.
 
     Parameters
@@ -148,6 +191,8 @@ def _collect_notebooks(entries: Any, where: str, found: list[str]) -> None:
         The value of a ``toc`` or ``children`` key.
     where : str
         Human-readable location of ``entries``, used in error messages.
+    root : Path
+        Folder against which the ``file`` entries are relative.
     found : list of str
         Receives the notebook paths, in table-of-contents order.
 
@@ -156,8 +201,10 @@ def _collect_notebooks(entries: Any, where: str, found: list[str]) -> None:
     TypeError
         If ``entries`` is not a list or an entry is not a mapping.
     ValueError
-        If an entry holds a key of an unsupported kind, or a ``file`` entry has no
-        extension.
+        If an entry holds a key of an unsupported kind, a ``file`` entry does not end
+        with one of the four extensions of MyST (the explicit extension is required),
+        or a markdown page declares a ``kernelspec`` in its front matter, which a MyST
+        build would execute and this runner would not.
     """
     if not isinstance(entries, list):
         raise TypeError(f"{where}: expected a list of entries, got {entries!r}")
@@ -174,16 +221,20 @@ def _collect_notebooks(entries: Any, where: str, found: list[str]) -> None:
             )
         file_name = entry.get("file")
         if file_name is not None:
-            suffix = Path(str(file_name)).suffix
-            if not suffix:
+            lowered = str(file_name).lower()
+            if not lowered.endswith(_VALID_SUFFIXES):
                 raise ValueError(
-                    f"{here}: file entry {file_name!r} has no extension, so it cannot "
-                    "be told from a notebook"
+                    f"{here}: file entry {file_name!r} does not end with one of "
+                    f"{list(_VALID_SUFFIXES)}. Write the explicit extension: MyST would "
+                    "complete it by probing the disk, and the entry could be a notebook "
+                    "that this runner would skip."
                 )
-            if suffix == _NOTEBOOK_SUFFIX:
+            if lowered.endswith(_NOTEBOOK_SUFFIX):
                 found.append(Path(str(file_name)).as_posix())
+            elif lowered.endswith(_MARKDOWN_SUFFIX):
+                _refuse_executable_markdown(root / str(file_name), here)
         if "children" in entry:
-            _collect_notebooks(entry["children"], f"{here}.children", found)
+            _collect_notebooks(entry["children"], f"{here}.children", root, found)
 
 
 def list_notebooks(myst_path: Path) -> list[str]:
@@ -218,11 +269,25 @@ def list_notebooks(myst_path: Path) -> list[str]:
     if "toc" not in project:
         raise ValueError(f"{myst_path}: no project.toc found")
     found: list[str] = []
-    _collect_notebooks(project["toc"], "project.toc", found)
+    _collect_notebooks(project["toc"], "project.toc", myst_path.parent, found)
     for notebook in found:
         if not (myst_path.parent / notebook).is_file():
             raise ValueError(f"{myst_path}: notebook {notebook!r} does not exist")
     return found
+
+
+def _is_finite_positive(value: Any) -> bool:
+    """Return True for a real number that is finite and greater than zero.
+
+    ``.nan`` and ``.inf`` are refused because they switch the budget off: ``nan <= 0``
+    is false and ``wall_time > nan`` is never true.
+    """
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0
+    )
 
 
 def load_timeouts(config_path: Path, notebooks: list[str]) -> TimeoutConfig:
@@ -243,18 +308,16 @@ def load_timeouts(config_path: Path, notebooks: list[str]) -> TimeoutConfig:
     Raises
     ------
     ValueError
-        If ``default_timeout_s`` is missing or not positive, a timeout is not
-        positive, or a path under ``timeouts`` is not a notebook of the table of
+        If ``default_timeout_s`` is missing, or it or a timeout is not a finite
+        positive number, or a path under ``timeouts`` is not a notebook of the table of
         contents (a typo would otherwise leave a notebook on the default unnoticed).
     """
     document = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     default = document.get("default_timeout_s")
-    if (
-        not isinstance(default, (int, float))
-        or isinstance(default, bool)
-        or default <= 0
-    ):
-        raise ValueError(f"{config_path}: default_timeout_s must be a positive number")
+    if not _is_finite_positive(default):
+        raise ValueError(
+            f"{config_path}: default_timeout_s must be a finite positive number"
+        )
     raw = document.get("timeouts") or {}
     if not isinstance(raw, dict):
         raise TypeError(f"{config_path}: timeouts must be a mapping")
@@ -265,8 +328,10 @@ def load_timeouts(config_path: Path, notebooks: list[str]) -> TimeoutConfig:
             f"table of contents ({notebooks})"
         )
     for path, value in raw.items():
-        if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
-            raise ValueError(f"{config_path}: timeout of {path!r} must be positive")
+        if not _is_finite_positive(value):
+            raise ValueError(
+                f"{config_path}: timeout of {path!r} must be a finite positive number"
+            )
     return TimeoutConfig(
         default_timeout_s=float(default),
         timeouts={path: float(value) for path, value in raw.items()},
@@ -303,7 +368,12 @@ def remaining_cell_timeout(
     return max(budget_s - elapsed_s, minimum_s)
 
 
-def execute_notebook(source: Path, executed: Path, timeout_s: float) -> NotebookResult:
+def execute_notebook(
+    source: Path,
+    executed: Path,
+    timeout_s: float,
+    min_cell_timeout_s: float = MIN_CELL_TIMEOUT_S,
+) -> NotebookResult:
     """Execute one notebook and write the executed copy.
 
     The kernel starts in the notebook's own folder. The source file is only read.
@@ -318,6 +388,9 @@ def execute_notebook(source: Path, executed: Path, timeout_s: float) -> Notebook
         written after a failure too, with the outputs produced up to the failure.
     timeout_s : float
         Budget of the whole notebook, in seconds, kernel start-up included.
+    min_cell_timeout_s : float, optional
+        Floor of the time given to a cell (see :func:`remaining_cell_timeout`). Tests
+        raise it to give slow cells a wide margin.
 
     Returns
     -------
@@ -328,7 +401,9 @@ def execute_notebook(source: Path, executed: Path, timeout_s: float) -> Notebook
     started = time.monotonic()
 
     def cell_timeout(_cell: Any) -> float:
-        return remaining_cell_timeout(timeout_s, time.monotonic() - started)
+        return remaining_cell_timeout(
+            timeout_s, time.monotonic() - started, min_cell_timeout_s
+        )
 
     client = NotebookClient(
         notebook,
@@ -357,6 +432,30 @@ def execute_notebook(source: Path, executed: Path, timeout_s: float) -> Notebook
     return NotebookResult(
         status=status, wall_time_s=wall_time_s, timeout_s=timeout_s, error=error
     )
+
+
+def remove_executed_notebooks(executed_dir: Path) -> list[Path]:
+    """Remove the executed notebooks left by an earlier run.
+
+    Only ``.ipynb`` files are removed, at any depth. The folder itself and every other
+    file stay: it also holds the staged pages and the downloaded theme of a book built
+    from the copies.
+
+    Parameters
+    ----------
+    executed_dir : Path
+        Folder of the executed copies; nothing happens if it does not exist.
+
+    Returns
+    -------
+    list of Path
+        The files removed.
+    """
+    removed = sorted(executed_dir.rglob(f"*{_NOTEBOOK_SUFFIX}"))
+    for path in removed:
+        if path.is_file():
+            path.unlink()
+    return removed
 
 
 def reset_timings(timings_path: Path) -> None:

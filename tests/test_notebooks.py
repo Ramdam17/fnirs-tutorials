@@ -18,6 +18,7 @@ from notebook_runner import (
     list_notebooks,
     load_timeouts,
     record_result,
+    remove_executed_notebooks,
     reset_timings,
 )
 
@@ -35,8 +36,13 @@ TIMEOUTS = load_timeouts(CONFIG_PATH, NOTEBOOKS)
 
 @pytest.fixture(scope="session", autouse=True)
 def _empty_timings() -> None:
-    """Empty the timings file once, so it never holds the result of an earlier run."""
+    """Start from no timings and no executed notebook of an earlier run.
+
+    The executed copies are removed, not the folder: it also holds the staged pages
+    and the theme of a book built from the copies.
+    """
     reset_timings(TIMINGS_PATH)
+    remove_executed_notebooks(EXECUTED_DIR)
 
 
 @pytest.mark.parametrize("notebook", NOTEBOOKS)
