@@ -502,9 +502,12 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "jupyter-book" },
+    { name = "nbclient" },
     { name = "nbconvert" },
+    { name = "nbformat" },
     { name = "papermill" },
     { name = "pytest" },
+    { name = "pyyaml" },
     { name = "ruff" },
 ]
 
@@ -520,9 +523,12 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "jupyter-book", specifier = "==2.1.7" },
+    { name = "nbclient", specifier = ">=0.11.0" },
     { name = "nbconvert" },
+    { name = "nbformat", specifier = ">=5.11.1" },
     { name = "papermill" },
     { name = "pytest" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "ruff" },
 ]
 

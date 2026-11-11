@@ -21,3 +21,6 @@ pysnirf2.log
 
 # Page snapshots written at the repository root by the browser tool used to screenshot the built site
 .playwright-mcp/
+
+# Per-notebook execution timings written by tests/test_notebooks.py
+build-reports/
