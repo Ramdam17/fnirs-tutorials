@@ -47,6 +47,38 @@ Lifting scipy to 1.16 breaks statsmodels 0.14.4, which imports the private funct
 
 With both overrides, Cedalion's own test suite at tag `v26.5.1` gives 302 passed and 4 skipped, with no failures (run on 2026-10-31). One warning deserves a later look: `test_global_component_subtract` emits "invalid value encountered in matmul" from scikit-learn's PCA. Whether it also appears with the original pins can only be checked on Linux, where the original pins install; this comparison should be made once CI exists. Linux (CI, Colab) is not affected by the scipy loading problem.
 
+## Google Colab
+
+Every notebook of the book opens on Google Colab from a link under its title, and its first code cell installs the environment and the data there. The cell is generated from `book/_templates/colab_setup.py` by `scripts/sync_colab_cells.py`, with the parameters of `config/colab.yaml`. What follows was measured on 2026-11-11 on Colab, with a Colab Pro account; a free account was not tried.
+
+The notebooks ask Colab for the runtime version `2026.07`, through the key `colab.runtime_attributes.runtime_version` of the notebook metadata, which Colab honours for a notebook opened from GitHub. That version runs Python 3.12.13. The default runtime, "Latest (recommended)", runs Python 3.13.18, which the package refuses because `pyproject.toml` requires Python 3.12; on it the setup cell stops with a message that names the version to choose. Google states that a past runtime version stays available for one year after its release, so this pin has to move before the summer of 2027. Connecting to a past version took between 90 and 104 s on five connections, against 8 s for the default runtime on one.
+
+The cell installs the package with `uv pip install --system --override`, and the override file holds the two overrides of `pyproject.toml`, scipy 1.16.3 and statsmodels 0.14.6. A plain `pip install` of the package does not read the overrides and gives Cedalion's own pins, scipy 1.15.3 and statsmodels 0.14.4. The install replaces nine packages of the Colab image (click, h5py, nibabel, numpy, pandas, pooch, pywavelets, scikit-learn and xarray) and leaves the packages the Colab kernel is built on, ipykernel 6.17.1 and ipython 7.34.0, untouched. Installing every version of `uv.lock` instead replaces those too, and the kernel then never comes back after a restart. The Colab environment is therefore not the lock file in full: a package that neither Cedalion nor the project pins keeps the version of the image, for instance matplotlib 3.10.0 where the lock has 3.10.9.
+
+| Package | In the `2026.07` image | After the setup cell |
+|---|---|---|
+| numpy | 2.0.2 | 2.2.6 |
+| scipy | 1.16.3 | 1.16.3 |
+| statsmodels | 0.14.6 | 0.14.6 |
+| pandas | 2.2.2 | 2.3.3 |
+| xarray | 2025.12.0 | 2025.6.1 |
+| scikit-learn | 1.6.1 | 1.7.2 |
+| h5py | 3.16.0 | 3.14.0 |
+| cedalion | absent | 26.5.1 |
+
+The session has to restart once after the install. The Colab kernel imports numpy before the first cell runs, Cedalion requires numpy 2.2, and the image ships 2.0.2: without a restart, `import cedalion` fails with `ImportError: cannot import name '_center' from 'numpy._core.umath'`. `uv` does not make Colab offer a restart, so the cell ends its own kernel after it has announced it, and Colab then shows the notice "Your session crashed for an unknown reason", which is expected here. Run again, the cell finds the file it wrote after the install, installs nothing and prints "The environment is ready."
+
+The cell follows Cedalion's own Colab script (`scripts/colab_setup.py` at the tag `v26.5.1`) on two points and departs from it on five.
+
+- Like Cedalion's script, it installs with `uv` and ends the kernel process to restart the session, after a wait of two seconds that lets the last lines reach the browser.
+- It does not mount the reader's Google Drive, so no sign-in is asked: the data are downloaded into the Colab machine by `scripts/download_data.py`, with their checksums.
+- It installs a release tag of Cedalion through the dependencies of the package, with the two overrides, where Cedalion's script installs a branch.
+- It does not uninstall `opt-einsum` and does not install the system package `tree`. The smoke notebook runs with `opt-einsum` in place; Cedalion's script gives no reason for removing it.
+- It does not configure PyVista for a display without a screen, which Cedalion's script does on its second run. The book has no 3D view yet; the chapter that adds one has to add that configuration.
+- It checks the Python version first, records what it installed so that a second run does nothing, and prints the time the install and the data download took.
+
+On two runs from the deployed book, the setup cell took 88 s and 453 s, and the smoke notebook then ran in 13 s and 17 s. The second setup was slow because the Colab machine received the packages from PyPI at under 1 MB/s for about twelve minutes; half an hour later the same machine downloaded the largest of them, a 105 MB wheel, in 3 s. `uv` prints nothing while it downloads, so a slow install shows no progress for several minutes.
+
 ## Cedalion API renames, 25.x to 26.5
 
 Every API name the series uses was resolved by introspection on the installed 26.5.1 package. The names below changed between 25.1.0 and 26.5.1. Notebooks use the new names.
