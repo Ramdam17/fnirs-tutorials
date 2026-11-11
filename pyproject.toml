@@ -27,7 +27,13 @@ allow-direct-references = true
 packages = ["src/fnirs_tutorials"]
 
 [dependency-groups]
-dev = ["pytest", "ruff", "nbconvert", "papermill"]
+dev = [
+    "pytest",
+    "ruff",
+    "nbconvert",
+    "papermill",
+    "jupyter-book==2.1.7",
+]
 
 [tool.uv]
 # Cedalion 26.5.1 pins scipy==1.15.*. The scipy 1.15.x macOS arm64 wheels fail to load on

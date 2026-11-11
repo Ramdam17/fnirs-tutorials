@@ -21,6 +21,19 @@ The environment is managed with uv from `pyproject.toml` and `uv.lock`. Cedalion
 | snirf | 0.8.0 | SNIRF validation; successor of pysnirf2 |
 | nirsimple | 0.1.6 | reference MBLL implementation for the by-hand module |
 
+## Book toolchain
+
+The site is built with Jupyter Book 2, which is a Python package that bundles the MyST engine and runs it on Node.js. It is installed in the development dependency group, and the versions below were measured on 2026-11-11 on the Mac.
+
+| Component | Version | Where the version comes from |
+|---|---|---|
+| jupyter-book | 2.1.7 | `uv run jupyter book --version` prints `v2.1.7`; pinned in `pyproject.toml` |
+| MyST engine (mystmd) | bundled, not installed separately | `uv pip list` shows no `mystmd` package; the bundle `jupyter_book/dist/jupyter-book.cjs` contains `myst-cli` 1.11.0 (read from its source, since `jupyter book --version` reports only the Jupyter Book version) |
+| Node.js | v26.12.0 on the Mac | `node --version` |
+| nodeenv | 1.12.0 | `uv pip list`; used only when no suitable Node.js is found |
+
+The Node.js requirement is read from the Jupyter Book source, not from the documentation. The check in `jupyter_book/__main__.py` accepts Node.js 18, 20 or 22 and later, and its error message says "Jupyter Book requires node 18, 20, or 22+". When no suitable Node.js is on the path, the tool offers to download Node.js 22.17.0 with nodeenv into a user data folder, after a prompt that the environment variable `JB_ALLOW_NODEENV` answers in advance.
+
 ## Platform overrides (macOS 27, arm64)
 
 Two of Cedalion's pins do not work on macOS 27, so `pyproject.toml` overrides them through `[tool.uv] override-dependencies`.
