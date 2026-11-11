@@ -261,7 +261,7 @@ _REFUSED_PAGES = {
         "---\nkernelspec:\n  name: p\nexecute:\n  skip: false\nskip_execution: true\n---\n",
         "kernelspec",
     ),
-    "skip as a string is not a boolean": (
+    "skip as a string is refused on purpose": (
         "---\nkernelspec:\n  name: p\nexecute:\n  skip: 'true'\n---\n",
         "kernelspec",
     ),

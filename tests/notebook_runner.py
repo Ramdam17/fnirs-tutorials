@@ -176,8 +176,11 @@ def _skips_execution(front_matter: dict[str, Any]) -> bool:
 
     ``execute.skip`` wins; the deprecated ``skip_execution`` fills it only when
     ``execute`` is not a mapping or holds no non-null ``skip`` (bundle lines 207880 to
-    207886). Only the YAML boolean true counts: ``"true"`` as a string is not accepted,
-    which can only err towards a refusal.
+    207886). Only the YAML boolean true counts. MyST's ``validateBoolean`` (bundle
+    lines 202179 to 202187) accepts the strings ``true`` and ``false`` in any case, so a
+    page with ``skip: 'true'`` is skipped by MyST; the runner refuses the string on
+    purpose, to keep the author's statement an unambiguous boolean, which can only err
+    towards a refusal.
     """
     execute = front_matter.get("execute")
     skip = execute.get("skip") if isinstance(execute, dict) else None
@@ -204,7 +207,13 @@ def _refuse_executable_markdown(page: Path, where: str) -> None:
       into the executable nodes (lines 284596 to 284606 and 289525) and, without a
       kernelspec, only writes a file error in its execution step (line 307279), which
       does not run here. This detection is textual, so it is a heuristic: it can wrongly
-      match a page that shows the syntax inside a literal block.
+      match a page that shows the syntax inside a literal block. It has two false
+      negatives: a ``{code-cell}`` brought in by an ``{include}`` (``includeFilesTransform``
+      runs at line 307877, before the execution step at line 307880), and a directive
+      opened inside a blockquote or a list item, which the pattern does not allow before
+      the fence. Both were read in the bundle and not built. The detection is an early
+      guard; the exact check reads the pages that MyST built and belongs with the build
+      of the book (Task 5).
 
     Such a page is accepted only if its author excluded it with ``execute: {skip:
     true}`` or the deprecated ``skip_execution: true`` (lines 207880 to 207886; see
@@ -249,8 +258,9 @@ def _refuse_executable_markdown(page: Path, where: str) -> None:
         return
     raise ValueError(
         f"{where}: markdown page {page.name!r} is meant for execution ("
-        f"{' and '.join(signs)}), so a MyST build with --execute would run it and "
-        "this runner would not. Convert it to a notebook, or set "
+        f"{' and '.join(signs)}), but this runner executes notebooks only, so the "
+        "code of the page would be published with no output. Convert it to a "
+        "notebook, or state that its code is not executed with "
         "'execute: {skip: true}' in its front matter."
     )
 
@@ -276,8 +286,9 @@ def _collect_notebooks(entries: Any, where: str, root: Path, found: list[str]) -
     ValueError
         If an entry holds a key of an unsupported kind, a ``file`` entry does not end
         with one of the four extensions of MyST (the explicit extension is required),
-        or a markdown page declares a ``kernelspec`` in its front matter, which a MyST
-        build would execute and this runner would not.
+        or a markdown page is meant for execution (a ``kernelspec`` in its front matter, or
+        a ``{code-cell}`` or ``{eval}`` in its text) and is not excluded by its author,
+        so that its code would be published with no output.
     """
     if not isinstance(entries, list):
         raise TypeError(f"{where}: expected a list of entries, got {entries!r}")
