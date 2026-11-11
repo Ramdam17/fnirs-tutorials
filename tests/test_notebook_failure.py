@@ -37,6 +37,12 @@ FIXTURE_TIMEOUT_S = 2.0
 FIXTURE_ERROR_TIMEOUT_S = 60.0
 # The sleeping fixture sleeps 60 s; far below that proves the timeout cut it short.
 SLEEPING_MAX_WALL_S = 30.0
+# Heuristic bound, not derived from a measurement: the child pytest of the command
+# tests takes a few seconds, so three minutes only catches a hang before the job limit
+# of a CI runner does.
+COMMAND_SUBPROCESS_TIMEOUT_S = 180.0
+CHILD_PREFIX = "[child] "
+STALE_EXECUTED_COPY = Path("_build") / "executed" / "book" / "old.ipynb"
 
 
 def _write(path: Path, text: str) -> Path:
@@ -236,6 +242,34 @@ def test_toc_accepts_a_markdown_page_with_other_front_matter(tmp_path: Path) -> 
     assert list_notebooks(myst) == []
 
 
+def test_toc_names_a_markdown_page_with_invalid_front_matter(tmp_path: Path) -> None:
+    """A leading ``---`` block that is not YAML is refused, naming the page."""
+    myst = _project(tmp_path, "    - file: broken.md\n", [])
+    _write(tmp_path / "broken.md", "---\nNote: a: b\n---\n\n# Title\n")
+    with pytest.raises(ValueError, match="broken.md") as raised:
+        list_notebooks(myst)
+    assert "not valid YAML" in str(raised.value)
+    assert raised.value.__cause__ is not None
+
+
+def test_toc_names_a_markdown_page_that_is_not_utf8(tmp_path: Path) -> None:
+    myst = _project(tmp_path, "    - file: latin.md\n", [])
+    (tmp_path / "latin.md").write_bytes(
+        "---\ntitle: caf\u00e9\n---\n".encode("latin-1")
+    )
+    with pytest.raises(ValueError, match="latin.md") as raised:
+        list_notebooks(myst)
+    assert "not UTF-8" in str(raised.value)
+    assert isinstance(raised.value.__cause__, UnicodeDecodeError)
+
+
+def test_toc_accepts_prose_between_two_horizontal_rules(tmp_path: Path) -> None:
+    """A block that parses as plain text, not a mapping, is ordinary markdown."""
+    myst = _project(tmp_path, "    - file: rules.md\n", [])
+    _write(tmp_path / "rules.md", "---\nSome prose\n\n---\n\n# Title\n")
+    assert list_notebooks(myst) == []
+
+
 def test_toc_missing_is_an_error(tmp_path: Path) -> None:
     myst = _write(tmp_path / "myst.yml", "version: 1\nproject:\n  title: x\n")
     with pytest.raises(ValueError, match="no project.toc"):
@@ -349,6 +383,9 @@ def _run_command_in_temporary_repository(
 ) -> tuple[int, dict[str, dict[str, object]]]:
     """Run ``pytest tests/test_notebooks.py`` in a repository that lists one fixture.
 
+    A stale notebook is planted under ``_build/executed/`` before the run; the command
+    must remove it, which pins the call made by the session fixture.
+
     The repository holds a ``myst.yml`` whose table of contents lists a copy of the
     fixture, a ``config/notebooks.yaml``, and copies of the real ``test_notebooks.py``
     and ``notebook_runner.py``. ``test_notebooks.py`` finds its repository from its own
@@ -372,6 +409,10 @@ def _run_command_in_temporary_repository(
     for name in ("test_notebooks.py", "notebook_runner.py"):
         (repo / "tests" / name).write_bytes((FIXTURES.parent / name).read_bytes())
 
+    stale = repo / STALE_EXECUTED_COPY
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes((FIXTURES / "failing.ipynb").read_bytes())
+
     completed = subprocess.run(
         [
             sys.executable,
@@ -385,8 +426,14 @@ def _run_command_in_temporary_repository(
         capture_output=True,
         text=True,
         check=False,
+        timeout=COMMAND_SUBPROCESS_TIMEOUT_S,
     )
-    sys.stdout.write(completed.stdout[-1500:])
+    # Both streams in full, each line prefixed so that a tool reading this output
+    # cannot take a line of the child for a line of the suite.
+    for stream in (completed.stdout, completed.stderr):
+        for line in stream.splitlines():
+            sys.stdout.write(f"{CHILD_PREFIX}{line}\n")
+    assert not stale.exists(), "the command left a stale executed copy"
     timings = json.loads(
         (repo / "build-reports" / "notebook-timings.json").read_text(encoding="utf-8")
     )

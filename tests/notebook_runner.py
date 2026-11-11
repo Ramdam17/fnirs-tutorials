@@ -153,6 +153,14 @@ def _refuse_executable_markdown(page: Path, where: str) -> None:
     A MyST build with ``--execute`` runs such a page like a notebook, whereas this
     runner only lists ``.ipynb`` files, so the page would be published unexecuted.
 
+    A page that opens with ``---`` is read as having a front matter, up to the next
+    ``\\n---``. That block is parsed as YAML. A block that parses to something other
+    than a mapping (for example prose between two horizontal rules) is ordinary
+    markdown and is accepted. A block that is not valid YAML, or a page that is not
+    UTF-8, is refused with an error naming the entry and the page: the ambiguity is
+    settled by the author, who either fixes the front matter or writes the rule as
+    ``***``, rather than by a guess of this runner.
+
     Parameters
     ----------
     page : Path
@@ -163,17 +171,29 @@ def _refuse_executable_markdown(page: Path, where: str) -> None:
     Raises
     ------
     ValueError
-        If the YAML front matter of the page has a ``kernelspec`` key.
+        If the YAML front matter of the page has a ``kernelspec`` key, if the page is
+        not UTF-8, or if its leading ``---`` block is not valid YAML.
     """
     if not page.is_file():
         return
-    text = page.read_text(encoding="utf-8")
+    try:
+        text = page.read_text(encoding="utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError(
+            f"{where}: markdown page {page.name!r} is not UTF-8."
+        ) from error
     if not text.startswith("---"):
         return
     parts = text.split("\n---", 1)
     if len(parts) < 2:
         return
-    front_matter = yaml.safe_load(parts[0][3:]) or {}
+    try:
+        front_matter = yaml.safe_load(parts[0][3:]) or {}
+    except yaml.YAMLError as error:
+        raise ValueError(
+            f"{where}: markdown page {page.name!r} opens with a '---' block that is "
+            "not valid YAML. Fix the front matter, or write a horizontal rule as '***'."
+        ) from error
     if isinstance(front_matter, dict) and "kernelspec" in front_matter:
         raise ValueError(
             f"{where}: markdown page {page.name!r} declares a kernelspec, so a MyST "
