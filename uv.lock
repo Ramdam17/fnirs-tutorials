@@ -431,10 +431,11 @@ wheels = [
 [[package]]
 name = "fnirs-tutorials"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "cedalion" },
     { name = "ipykernel" },
+    { name = "matplotlib" },
     { name = "nirsimple" },
     { name = "snirf" },
 ]
@@ -451,6 +452,7 @@ dev = [
 requires-dist = [
     { name = "cedalion", git = "https://github.com/ibs-lab/cedalion?rev=v26.5.1" },
     { name = "ipykernel" },
+    { name = "matplotlib" },
     { name = "nirsimple" },
     { name = "snirf" },
 ]

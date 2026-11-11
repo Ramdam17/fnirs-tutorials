@@ -1,5 +1,7 @@
 # Data are downloaded by scripts/download_data.py and never committed.
 data/
+# Local cache of derived files, rebuilt on demand.
+.cache/
 # Python / uv
 .venv/
 __pycache__/

@@ -11,13 +11,25 @@ dependencies = [
     # snirf is the maintained successor of pysnirf2 (which breaks on numpy 2); used for SNIRF validation.
     "snirf",
     "ipykernel",
+    # fnirs_tutorials.style imports matplotlib directly.
+    "matplotlib",
 ]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+# Needed because the Cedalion dependency is a direct git reference.
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fnirs_tutorials"]
 
 [dependency-groups]
 dev = ["pytest", "ruff", "nbconvert", "papermill"]
 
 [tool.uv]
-package = false
 # Cedalion 26.5.1 pins scipy==1.15.*. The scipy 1.15.x macOS arm64 wheels fail to load on
 # macOS 27 (dyld rejects the __DATA/__thread_bss section of _spropack). 1.16.3 loads; measured
 # 2026-10-31. scipy 1.16 removed scipy._lib._util._lazywhere, which statsmodels 0.14.4 (also
