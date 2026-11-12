@@ -463,12 +463,27 @@ def is_file_or_absent(path: Path) -> bool:
         return False
 
 
+class _Misspelt(Exception):
+    """A reference names an existing file with a spelling the disk does not store."""
+
+    def __init__(self, candidate: Path, spelled: Path) -> None:
+        super().__init__(f"{candidate} is spelled {spelled} on the disk")
+        self.candidate = candidate
+        self.spelled = spelled
+
+
 def _local_target(raw: str, page: Path, root: Path) -> Path | None:
     """Resolve a reference found in ``page`` to a file of ``root``, or None.
 
     A fragment (``#...``) and a query (``?...``) are dropped; a URL with a scheme is not
     local; a path that starts with ``/`` is relative to ``root``; any other path is
     relative to the folder of ``page``.
+
+    Raises
+    ------
+    _Misspelt
+        When the file exists but the disk stores its name with another spelling. A host
+        that tells case apart would not find it, and the caller decides what that costs.
     """
     target = raw.split("#", 1)[0].split("?", 1)[0]
     if not target or _URL_SCHEME.match(target):
@@ -485,16 +500,7 @@ def _local_target(raw: str, page: Path, root: Path) -> Path | None:
         return None
     spelled = spell_as_on_disk(candidate)
     if spelled != candidate:
-        # A host that tells case apart would not find this file: the reference is left
-        # unresolved, as it would be there, and MyST then reports it under --strict.
-        logger.warning(
-            "%s: reference %r is spelled differently from the file the disk names %s; "
-            "a case-sensitive host would not find it, so it is not staged",
-            page,
-            raw,
-            spelled,
-        )
-        return None
+        raise _Misspelt(candidate, spelled)
     return candidate
 
 
@@ -566,7 +572,16 @@ def find_referenced_files(page: Path, root: Path) -> list[Path]:
             m[1] for m in _DIRECTIVE_PATH.findall(text)
         ]
         for raw in raws:
-            target = _local_target(raw, current, root)
+            try:
+                target = _local_target(raw, current, root)
+            except _Misspelt as error:
+                raise BookError(
+                    EXIT_FILE_ERROR,
+                    f"{current}: the reference {raw!r} is spelled differently from the "
+                    f"file the disk names, {error.spelled}. This disk ignores case; a "
+                    "case-sensitive host (the Linux runner, GitHub Pages) would not "
+                    "find it, while MyST finds it here. Write it as the disk spells it.",
+                ) from None
             if target is None or target in seen:
                 continue
             seen.add(target)
@@ -594,7 +609,10 @@ def _strings_of(node: Any) -> list[str]:
 
 
 def find_config_files(
-    document: dict[str, Any], myst_path: Path, root: Path
+    document: dict[str, Any],
+    myst_path: Path,
+    root: Path,
+    misspelt: list[tuple[str, Path, Path]] | None = None,
 ) -> list[Path]:
     """List the local files that ``myst.yml`` names, such as a bibliography or a logo.
 
@@ -606,6 +624,10 @@ def find_config_files(
         Path of ``myst.yml``; its folder is the base of the paths it holds.
     root : Path
         Repository root.
+    misspelt : list, optional
+        Receives ``(string, name as written, name the disk stores)`` for each string that
+        names an existing file with a spelling the disk does not store. Such a string is
+        warned about and not staged, which is what a case-sensitive host does with it.
 
     Returns
     -------
@@ -617,7 +639,19 @@ def find_config_files(
     """
     found: list[Path] = []
     for raw in _strings_of(document):
-        target = _local_target(raw, myst_path, root)
+        try:
+            target = _local_target(raw, myst_path, root)
+        except _Misspelt as error:
+            logger.warning(
+                "%s: the string %r names a file the disk spells %s; a case-sensitive "
+                "host would not find it, so it is not staged",
+                myst_path,
+                raw,
+                error.spelled,
+            )
+            if misspelt is not None:
+                misspelt.append((raw, error.candidate, error.spelled))
+            continue
         if target is None or target == myst_path.resolve() or target in found:
             continue
         if _is_stageable(target, raw, myst_path, root):
@@ -772,79 +806,6 @@ def check_static_entries(
                 )
 
 
-def static_copy_of(root: Path, executed_dir: Path, entry: Path) -> Path:
-    """Return the place in the staging folder where the copy of a static entry lies.
-
-    Raises
-    ------
-    BookError
-        With ``EXIT_BAD_EXECUTED_DIR`` when that place is not inside the staging folder,
-        for example because a folder of the path is a link that leads out of it.
-    """
-    stage = executed_dir.resolve()
-    copy = executed_dir / entry.relative_to(root.resolve())
-    parent = copy.parent.resolve()
-    if parent != stage and stage not in parent.parents:
-        raise BookError(
-            EXIT_BAD_EXECUTED_DIR,
-            f"the staged copy {copy} of a static entry is not inside the staging "
-            f"folder {executed_dir}; nothing was removed.",
-        )
-    return copy
-
-
-def remove_stale_static(
-    root: Path, executed_dir: Path, entries: list[Path]
-) -> list[Path]:
-    """Remove the staged copy of each static entry, so that a deleted file is not kept.
-
-    The copy of a static folder is a fresh copy of the folder at every build; without
-    this a file deleted from ``interactive/`` would stay in the staging folder and be
-    published again by every local build.
-
-    What it may remove, and what guarantees it. Only the counterpart, inside the staging
-    folder, of an entry of ``project.static_files``. Three checks stand before it, and it
-    is called only after them: ``check_executed_dir`` (the staging folder is neither the
-    repository root nor one of its parents), :func:`static_entry_paths` (an entry lies in
-    the repository and not under ``data/`` or ``_build/``) and
-    :func:`check_static_entries` (an entry holds no page of the table of contents and is
-    not the staging folder or one of its parents or children, so its counterpart holds no
-    executed notebook). It re-checks that the parent of each copy resolves inside the
-    staging folder, and a link at the place of the copy is unlinked, never followed.
-
-    Parameters
-    ----------
-    root : Path
-        Repository root.
-    executed_dir : Path
-        The staging folder.
-    entries : list of Path
-        Resolved entries, as returned by :func:`static_entry_paths`.
-
-    Returns
-    -------
-    list of Path
-        The staged copies removed.
-
-    Raises
-    ------
-    BookError
-        With ``EXIT_BAD_EXECUTED_DIR`` when a copy to remove is not inside the staging
-        folder.
-    """
-    removed: list[Path] = []
-    for entry in entries:
-        copy = static_copy_of(root, executed_dir, entry)
-        if copy.is_symlink() or copy.is_file():
-            copy.unlink()
-        elif copy.is_dir():
-            shutil.rmtree(copy)
-        else:
-            continue
-        removed.append(copy)
-    return removed
-
-
 def find_static_files(
     document: dict[str, Any], myst_path: Path, root: Path
 ) -> list[Path]:
@@ -897,25 +858,38 @@ def find_static_files(
     return found
 
 
-def remove_stale_site(stage_dir: Path) -> list[Path]:
-    """Remove the site and the HTML of an earlier build from the staging folder.
+def check_misspelt_strings(
+    root: Path,
+    executed_dir: Path,
+    misspelt: list[tuple[str, Path, Path]],
+    writes: list[StageOperation],
+    myst_path: Path,
+) -> None:
+    """Refuse a string of ``myst.yml`` whose file reaches the staging folder another way.
 
-    MyST does not clear ``_build/site/content/``, so a page written by an earlier build
-    would still be there after this one and would be read as if it belonged to it. The
-    downloaded theme, ``_build/templates``, is kept: it is slow to fetch.
+    A string of ``myst.yml`` that names an existing file with another spelling is left
+    unstaged with a warning: MyST then finds nothing on either kind of disk, and the
+    string may be prose that is not meant as a path. When the same file is written by
+    the plan, or the staging folder already holds it (a page, an executed copy), MyST
+    finds it on a disk that ignores case and not on one that tells case apart, so the
+    string is refused.
 
-    Returns
-    -------
-    list of Path
-        The folders removed.
+    Raises
+    ------
+    BookError
+        With ``EXIT_FILE_ERROR``, naming the string and the spelling of the disk.
     """
-    removed = []
-    for sub in (SITE_SUBDIR, HTML_SUBDIR):
-        path = stage_dir / sub
-        if path.exists():
-            shutil.rmtree(path)
-            removed.append(path)
-    return removed
+    for raw, _candidate, spelled in misspelt:
+        place = executed_dir / spelled.relative_to(root.resolve())
+        if os.path.lexists(place) or any(op.path == place for op in writes):
+            raise BookError(
+                EXIT_FILE_ERROR,
+                f"{myst_path}: the string {raw!r} is spelled differently from the file "
+                f"the disk names, {spelled}, and the build stages that file anyway. MyST "
+                "would find it on this disk and not on a host that tells case apart. "
+                "Write it as the disk spells it; a string that is not meant as a path "
+                "has to be worded otherwise.",
+            )
 
 
 def check_toc_spelling(root: Path, toc_files: list[str], myst_path: Path) -> None:
@@ -970,29 +944,34 @@ def check_executed_dir(root: Path, executed_dir: Path) -> None:
         )
 
 
-@dataclass
-class PlannedCopy:
-    """One file to stage: where it is read and where it is written.
+REMOVE = "remove"
+COPY = "copy"
+
+
+@dataclass(frozen=True)
+class StageOperation:
+    """One operation on the staging folder: a removal or a write, with its exact path.
 
     Attributes
     ----------
-    source : Path
-        File of the repository to read.
-    relative : Path
-        Path of the file below the repository root, which is also its path below the
-        staging folder.
-    destination : Path
-        ``executed_dir / relative``.
+    kind : str
+        ``REMOVE`` or ``COPY``.
+    path : Path
+        Exact path below the staging folder, as the script will use it, links not
+        resolved. A removal whose path is a link unlinks the link and never follows it.
+        A copy writes a file at this path and creates the folders above it.
+    source : Path or None
+        For a copy, the file of the repository to read.
     """
 
-    source: Path
-    relative: Path
-    destination: Path
+    kind: str
+    path: Path
+    source: Path | None = None
 
 
 @dataclass
 class StagePlan:
-    """What a build will stage, with every refusal already made.
+    """The operations a build performs on the staging folder, every refusal already made.
 
     Attributes
     ----------
@@ -1000,33 +979,141 @@ class StagePlan:
         Repository root and staging folder.
     toc_files, notebooks : list of str
         Files of the table of contents, and the notebooks among them.
-    static_entries : list of Path
-        The entries of ``project.static_files``; their staged copies are removed first.
-    copies : list of PlannedCopy
-        The files to copy, each destination once.
+    operations : list of StageOperation
+        Every removal, then every write, in the order of execution. The execution touches
+        the staging folder through these and no other path.
     """
 
     root: Path
     executed_dir: Path
     toc_files: list[str]
     notebooks: list[str]
-    static_entries: list[Path]
-    copies: list[PlannedCopy]
+    operations: list[StageOperation]
+
+    @property
+    def copies(self) -> list[StageOperation]:
+        """The writes of the plan, in order."""
+        return [op for op in self.operations if op.kind == COPY]
+
+
+def owned_by_others(executed_dir: Path, notebooks: list[str]) -> list[Path]:
+    """List what the staging folder holds that this script neither writes nor removes.
+
+    The executed copy of each notebook of the table of contents, at ``executed_dir / name``
+    as the table of contents writes it (the notebook command writes it there and removes
+    it itself); and everything MyST keeps in ``_build`` apart from the site and the HTML
+    this script clears: the downloaded theme, ``_build/templates``, which is slow to fetch,
+    and any other entry that the folder holds. The listing is read from the disk, since
+    MyST can add an entry.
+
+    Returns
+    -------
+    list of Path
+        Exact paths below ``executed_dir``.
+    """
+    owned = [executed_dir / name for name in notebooks]
+    build_dir = executed_dir / HTML_SUBDIR.parent
+    keep_apart = {SITE_SUBDIR.name, HTML_SUBDIR.name}
+    try:
+        names = os.listdir(build_dir)
+    except OSError:
+        names = []
+    owned.extend(build_dir / name for name in names if name not in keep_apart)
+    owned.append(build_dir / "templates")
+    return owned
+
+
+def check_stage_operations(
+    executed_dir: Path, operations: list[StageOperation], owned: list[Path]
+) -> None:
+    """Refuse an operation that leaves the staging folder or touches what is not ours.
+
+    Two invariants, checked on each operation whatever input produced it. Containment: no
+    folder between the staging folder and the path is a link, so the operation happens
+    inside the staging folder as the disk sees it; a path to write is not a link either.
+    A link that an earlier removal of the plan removes does not count, since it is gone
+    when the operation runs. A path to remove that is itself a link is allowed: it is
+    unlinked and never followed. Ownership: no removal is a path of ``owned`` or one of
+    its ancestors, and no write replaces one or lies under one.
+
+    Raises
+    ------
+    BookError
+        With ``EXIT_BAD_EXECUTED_DIR``, naming the operation and the reason, before
+        anything is removed or written.
+    """
+    removed: list[Path] = []
+
+    def gone(path: Path) -> bool:
+        return any(r == path or r in path.parents for r in removed)
+
+    for op in operations:
+        try:
+            relative = op.path.relative_to(executed_dir)
+        except ValueError:
+            relative = None
+        if relative is None or not relative.parts or ".." in relative.parts:
+            raise BookError(
+                EXIT_BAD_EXECUTED_DIR,
+                f"{op.kind} of {op.path} is not a path below the staging folder "
+                f"{executed_dir}; nothing was changed.",
+            )
+        current = executed_dir
+        for part in relative.parts[:-1]:
+            current = current / part
+            if current.is_symlink() and not gone(current):
+                raise BookError(
+                    EXIT_BAD_EXECUTED_DIR,
+                    f"the {op.kind} of {op.path} would go through {current}, a link of "
+                    f"the staging folder {executed_dir}, and leave it; nothing was "
+                    "changed. Remove the link.",
+                )
+        if op.kind == COPY and op.path.is_symlink() and not gone(op.path):
+            raise BookError(
+                EXIT_BAD_EXECUTED_DIR,
+                f"{op.path} in the staging folder {executed_dir} is a link, and the "
+                "copy would write through it; nothing was changed. Remove the link.",
+            )
+        for held in owned:
+            hits = (
+                held == op.path or op.path in held.parents
+                if op.kind == REMOVE
+                else held == op.path or held in op.path.parents
+            )
+            if hits:
+                raise BookError(
+                    EXIT_BAD_EXECUTED_DIR,
+                    f"the {op.kind} of {op.path} would reach {held}, which the notebook "
+                    "command or MyST keeps in the staging folder and this script does "
+                    "not own; nothing was changed.",
+                )
+        if op.kind == REMOVE:
+            removed.append(op.path)
 
 
 def plan_stage(root: Path, executed_dir: Path) -> StagePlan:
-    """Read ``myst.yml``, the pages and the folders, and decide what is staged.
+    """Read ``myst.yml``, the pages and the folders, and list what is done to the staging folder.
 
-    This function writes and removes nothing. Every refusal of the staging is made
-    here, so that a refused build leaves the staging folder as it found it: the table of
-    contents and its spelling, the executed copies, the static entries, what a static
-    entry holds (links that lead out of the folder included), and the destination of
-    each source. ``root`` and ``executed_dir`` must have gone through :func:`on_disk`.
+    This function writes and removes nothing. It refuses, before the execution touches
+    anything:
 
-    The staging folder is owned as follows. The executed copies belong to the notebook
-    command and are never removed here. ``_build/site``, ``_build/html`` and the staged
-    copy of each static entry are the script's and are removed by :func:`execute_stage`,
-    after this function has returned.
+    * a table of contents that the notebook reader refuses, or an entry that the disk
+      spells differently;
+    * a notebook without a fresh executed copy;
+    * a static entry that is not a list of existing paths in the repository, that is
+      spelled differently, lies under ``data/`` or ``_build/``, holds a page of the table
+      of contents, or is the staging folder or one of its parents or children;
+    * a link of a static folder that leads out of it or is spelled differently;
+    * a reference of a page or of a notebook that the disk spells differently, and a
+      string of ``myst.yml`` that does so when the file it names is staged anyway;
+    * a source that does not resolve under the repository;
+    * an operation on the staging folder that goes through a link or that touches what
+      the script does not own (:func:`check_stage_operations`).
+
+    The staging folder is owned as follows. The executed copies and ``_build/templates``
+    belong to the notebook command and to MyST; ``_build/site``, ``_build/html`` and the
+    staged copy of each static entry are the script's, and the plan lists their removal.
+    ``root`` and ``executed_dir`` must have gone through :func:`on_disk`.
 
     Parameters
     ----------
@@ -1038,14 +1125,12 @@ def plan_stage(root: Path, executed_dir: Path) -> StagePlan:
     Returns
     -------
     StagePlan
-        The files to stage.
+        The operations, removals first.
 
     Raises
     ------
     BookError
-        If the table of contents is refused, a notebook has no fresh executed copy, a
-        static entry or a link of a static folder is refused, or a source cannot be
-        placed under the repository.
+        For any refusal above.
     """
     myst_path = root / "myst.yml"
     toc_files, notebooks = read_toc_files(myst_path)
@@ -1054,8 +1139,6 @@ def plan_stage(root: Path, executed_dir: Path) -> StagePlan:
     document = load_myst_document(myst_path)
     static_entries = static_entry_paths(document, myst_path, root)
     check_static_entries(root, executed_dir, static_entries, toc_files, myst_path)
-    for entry in static_entries:
-        static_copy_of(root, executed_dir, entry)
     sources = [myst_path]
     for name in toc_files:
         page = root / name
@@ -1068,12 +1151,13 @@ def plan_stage(root: Path, executed_dir: Path) -> StagePlan:
             continue
         sources.append(page)
         sources.extend(find_referenced_files(page, root))
-    for config_file in find_config_files(document, myst_path, root):
+    misspelt: list[tuple[str, Path, Path]] = []
+    for config_file in find_config_files(document, myst_path, root, misspelt):
         sources.append(config_file)
         if config_file.suffix.lower() == ".md":
             sources.extend(find_referenced_files(config_file, root))
     sources.extend(find_static_files(document, myst_path, root))
-    copies: list[PlannedCopy] = []
+    writes: list[StageOperation] = []
     seen: set[Path] = set()
     for source in sources:
         resolved = source.resolve()
@@ -1088,15 +1172,40 @@ def plan_stage(root: Path, executed_dir: Path) -> StagePlan:
                 f"cannot stage {source}: it resolves to {resolved}, which is not "
                 f"under the repository {root}.",
             ) from None
-        copies.append(PlannedCopy(source, relative, executed_dir / relative))
-    return StagePlan(root, executed_dir, toc_files, notebooks, static_entries, copies)
+        writes.append(StageOperation(COPY, executed_dir / relative, source))
+    check_misspelt_strings(root, executed_dir, misspelt, writes, myst_path)
+    removals = [
+        StageOperation(REMOVE, executed_dir / sub)
+        for sub in (SITE_SUBDIR, HTML_SUBDIR)
+        if os.path.lexists(executed_dir / sub)
+    ]
+    for entry in static_entries:
+        copy = executed_dir / entry.relative_to(root.resolve())
+        if os.path.lexists(copy):
+            removals.append(StageOperation(REMOVE, copy))
+    operations = removals + writes
+    check_stage_operations(
+        executed_dir, operations, owned_by_others(executed_dir, notebooks)
+    )
+    return StagePlan(root, executed_dir, toc_files, notebooks, operations)
+
+
+def _remove(path: Path) -> bool:
+    """Remove a file, a link (never followed) or a folder; return False if it is absent."""
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+    else:
+        return False
+    return True
 
 
 def execute_stage(plan: StagePlan) -> StagedBook:
-    """Remove what an earlier build left, then copy the files of the plan.
+    """Run the operations of the plan in order, and compute no path of its own.
 
-    It raises only for what the disk does: a file that cannot be removed, read or
-    written. Every refusal was made by :func:`plan_stage`.
+    Every refusal was made by :func:`plan_stage`, so this raises only for what the disk
+    does: a file that cannot be removed, read or written.
 
     Returns
     -------
@@ -1108,24 +1217,24 @@ def execute_stage(plan: StagePlan) -> StagedBook:
         toc_files=plan.toc_files,
         notebooks=plan.notebooks,
     )
-    for removed in remove_stale_site(plan.executed_dir):
-        logger.info("Removed %s from an earlier build", removed)
-    for removed in remove_stale_static(
-        plan.root, plan.executed_dir, plan.static_entries
-    ):
-        logger.info("Removed %s from an earlier build", removed)
-    for item in plan.copies:
+    for op in plan.operations:
+        relative = op.path.relative_to(plan.executed_dir)
+        if op.kind == REMOVE:
+            if _remove(op.path):
+                logger.info("Removed %s from an earlier build", op.path)
+            continue
+        assert op.source is not None
         try:
-            item.destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(item.source, item.destination)
+            op.path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(op.source, op.path)
         except OSError as error:
             raise BookError(
                 EXIT_FILE_ERROR,
-                f"cannot stage {item.relative.as_posix()} to {item.destination}: "
+                f"cannot stage {relative.as_posix()} to {op.path}: "
                 f"{type(error).__name__}: {error}",
             ) from error
-        staged.copied.append(item.relative)
-        logger.info("Staged %s", item.relative.as_posix())
+        staged.copied.append(relative)
+        logger.info("Staged %s", relative.as_posix())
     return staged
 
 

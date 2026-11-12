@@ -2144,14 +2144,27 @@ def test_a_path_that_cannot_be_listed_is_kept_as_given(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------------------
 
 
-def snapshot(folder: Path) -> dict[str, bytes | None]:
-    """Return every file and folder under ``folder`` with its content (None for a folder)."""
-    if not folder.exists():
+def snapshot(folder: Path) -> dict[str, tuple[Any, ...]]:
+    """Describe every entry under ``folder`` without following a link.
+
+    A folder is ``("dir",)``, a link is ``("link", text of the link)``, and a file is
+    ``("file", bytes, st_mtime_ns)``, so that a rewrite with the same bytes, a link that
+    is pointed elsewhere and a folder that is replaced by a link are all seen.
+    """
+    if not os.path.lexists(folder):
         return {}
-    return {
-        p.relative_to(folder).as_posix(): p.read_bytes() if p.is_file() else None
-        for p in sorted(folder.rglob("*"))
-    }
+    found: dict[str, tuple[Any, ...]] = {}
+    for current, folders, files in os.walk(folder, followlinks=False):
+        for name in sorted(folders + files):
+            path = Path(current) / name
+            key = path.relative_to(folder).as_posix()
+            if path.is_symlink():
+                found[key] = ("link", os.readlink(path))
+            elif path.is_dir():
+                found[key] = ("dir",)
+            else:
+                found[key] = ("file", path.read_bytes(), path.stat().st_mtime_ns)
+    return found
 
 
 def project_with_stale_stage(tmp_path: Path, static: list[str] | None = None) -> Path:
@@ -2221,19 +2234,63 @@ def test_a_page_of_the_table_of_contents_spelled_with_another_case_is_refused(
 
 
 @pytest.mark.usefixtures("case_blind_disk")
-def test_a_reference_spelled_with_another_case_is_not_staged_and_is_warned_of(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize("reference", ["/Images/FIG.png", "../Images/fig.png"])
+def test_a_reference_of_a_page_spelled_with_another_case_is_refused(
+    tmp_path: Path, reference: str
 ) -> None:
     root = make_project(
         tmp_path,
         ["notebook_smoke", "no_code"],
-        texts={"no_code": "![figure](/Images/FIG.png)\n"},
+        texts={"no_code": f"![figure]({reference})\n"},
     )
     write_files(root, ["images/fig.png"])
-    staged = build_book.stage_book(root, root / "_build" / "executed")
-    assert Path("images/fig.png") not in staged.copied
-    assert "images/fig.png" in caplog.text
-    assert "/Images/FIG.png" in caplog.text
+    executed = root / "_build" / "executed"
+    before = snapshot(executed)
+    with pytest.raises(build_book.BookError) as stop:
+        build_book.stage_book(root, executed)
+    assert stop.value.exit_code == build_book.EXIT_FILE_ERROR
+    message = str(stop.value)
+    assert "no_code.md" in message
+    assert repr(reference) in message
+    assert "images/fig.png" in message
+    assert snapshot(executed) == before
+
+
+@pytest.mark.usefixtures("case_blind_disk")
+def test_a_reference_of_a_notebook_cell_spelled_with_another_case_is_refused(
+    tmp_path: Path,
+) -> None:
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"])
+    (root / NOTEBOOK).write_text(
+        _notebook_with_markdown("![figure](/Images/FIG.png)"), encoding="utf-8"
+    )
+    write_files(root, ["images/fig.png"])
+    stamp = (root / NOTEBOOK).stat().st_mtime + 100
+    os.utime(root / "_build" / "executed" / NOTEBOOK, (stamp, stamp))
+    with pytest.raises(build_book.BookError) as stop:
+        build_book.stage_book(root, root / "_build" / "executed")
+    assert stop.value.exit_code == build_book.EXIT_FILE_ERROR
+    assert "notebook_smoke.ipynb" in str(stop.value)
+
+
+@pytest.mark.usefixtures("case_blind_disk")
+def test_one_file_referenced_with_two_spellings_is_refused_for_the_second(
+    tmp_path: Path,
+) -> None:
+    root = make_project(
+        tmp_path,
+        ["notebook_smoke", "no_code", "plain_fence"],
+        texts={
+            "no_code": "![dot](img/dot.png)\n",
+            "plain_fence": "![dot](Img/DOT.png)\n",
+        },
+    )
+    write_files(root, ["book/img/dot.png"])
+    with pytest.raises(build_book.BookError) as stop:
+        build_book.stage_book(root, root / "_build" / "executed")
+    assert stop.value.exit_code == build_book.EXIT_FILE_ERROR
+    assert "plain_fence.md" in str(stop.value)
+    assert "'Img/DOT.png'" in str(stop.value)
 
 
 @pytest.mark.usefixtures("case_blind_disk")
@@ -2276,123 +2333,195 @@ def test_a_staging_folder_that_is_the_root_in_another_case_is_refused(
     assert runner.calls == []
 
 
-def scenario_static(entry: str) -> Any:
-    def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-        root = project_with_stale_stage(tmp_path, [entry])
-        write_files(root, ["data/fresh/small.csv"])
-        return root / "_build" / "executed"
-
-    return setup
+# --------------------------------------------------------------------------------------
+# The plan lists the operations on the staging folder, and two invariants hold on them
+# --------------------------------------------------------------------------------------
 
 
-def scenario_link_to_file(target: str) -> Any:
-    def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-        root = project_with_stale_stage(tmp_path, ["interactive"])
-        write_files(root, ["data/fresh/secret.csv", "book/page.md"])
-        (tmp_path / "outside-repo.txt").write_text("x", encoding="utf-8")
-        (root / "interactive" / "link.txt").symlink_to((root / target).resolve())
-        return root / "_build" / "executed"
-
-    return setup
+def folder_outside(tmp_path: Path) -> Path:
+    """Make a folder beside the repository that no build may write to or remove from."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep", encoding="utf-8")
+    return outside
 
 
-def scenario_link_to_folder(target: str) -> Any:
-    def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-        root = project_with_stale_stage(tmp_path, ["interactive"])
-        write_files(root, ["data/fresh/secret.csv"])
-        (tmp_path / "outside-dir").mkdir()
-        (root / "interactive" / "linked").symlink_to(
-            (root / target).resolve(), target_is_directory=True
-        )
-        return root / "_build" / "executed"
-
-    return setup
-
-
-def scenario_entry_in_staging(entry: str) -> Any:
-    def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-        root = project_with_stale_stage(tmp_path, [entry])
-        executed = root / "out" / "stage"
-        shutil.copytree(root / "_build" / "executed", executed)
-        return executed
-
-    return setup
+def test_a_folder_of_the_staging_folder_that_is_a_link_out_of_it_is_refused(
+    tmp_path: Path,
+) -> None:
+    root = project_with_stale_stage(tmp_path, ["interactive"])
+    write_files(root, ["plugins/p.mjs"])
+    add_to_myst(root, {"plugins": ["plugins/p.mjs"]}, {})
+    outside = folder_outside(tmp_path)
+    executed = root / "_build" / "executed"
+    (executed / "plugins").symlink_to(outside, target_is_directory=True)
+    before, beyond = snapshot(executed), snapshot(outside)
+    error = refuse(root, executed)
+    assert error.exit_code == build_book.EXIT_BAD_EXECUTED_DIR
+    assert "a link" in str(error) and "plugins" in str(error)
+    assert snapshot(executed) == before
+    assert snapshot(outside) == beyond
 
 
-def scenario_not_placeable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def test_a_build_folder_that_is_a_link_is_not_followed_by_the_removal(
+    tmp_path: Path,
+) -> None:
     root = project_with_stale_stage(tmp_path)
-    (tmp_path / "elsewhere.txt").write_text("x", encoding="utf-8")
-    monkeypatch.setattr(
-        build_book, "find_static_files", lambda *_args: [tmp_path / "elsewhere.txt"]
+    executed = root / "_build" / "executed"
+    outside = folder_outside(tmp_path)
+    shutil.copytree(executed / "_build", outside / "moved")
+    shutil.rmtree(executed / "_build")
+    (executed / "_build").symlink_to(outside / "moved", target_is_directory=True)
+    before, beyond = snapshot(executed), snapshot(outside)
+    error = refuse(root, executed)
+    assert error.exit_code == build_book.EXIT_BAD_EXECUTED_DIR
+    assert snapshot(executed) == before
+    assert snapshot(outside) == beyond
+
+
+def test_a_destination_that_is_a_link_is_not_written_through(tmp_path: Path) -> None:
+    root = project_with_stale_stage(tmp_path)
+    outside = folder_outside(tmp_path)
+    executed = root / "_build" / "executed"
+    (executed / "myst.yml").symlink_to(outside / "keep.txt")
+    before, beyond = snapshot(executed), snapshot(outside)
+    error = refuse(root, executed)
+    assert error.exit_code == build_book.EXIT_BAD_EXECUTED_DIR
+    assert "is a link" in str(error)
+    assert snapshot(executed) == before
+    assert snapshot(outside) == beyond
+
+
+def link_the_notebook_of_the_book(root: Path) -> None:
+    """Make the notebook of the table of contents a link to a notebook elsewhere."""
+    elsewhere = root / "notebooks"
+    elsewhere.mkdir()
+    (root / NOTEBOOK).replace(elsewhere / "notebook_smoke.ipynb")
+    (root / NOTEBOOK).symlink_to(elsewhere / "notebook_smoke.ipynb")
+
+
+@pytest.mark.parametrize("other_checks", ["kept", "removed"])
+def test_a_static_entry_that_holds_a_linked_notebook_is_refused_by_ownership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, other_checks: str
+) -> None:
+    root = make_project(tmp_path, ["notebook_smoke"])
+    add_to_myst(root, {"static_files": ["book"]}, {})
+    link_the_notebook_of_the_book(root)
+    executed = root / "_build" / "executed"
+    write_files(executed, ["_build/site/content/stale.json"])
+    if other_checks == "removed":
+        # The invariant must guard even if no other check stood before it.
+        monkeypatch.setattr(build_book, "check_static_entries", lambda *_args: None)
+        monkeypatch.setattr(build_book, "_refuse_links_out_of", lambda *_args: None)
+    before = snapshot(executed)
+    assert (executed / NOTEBOOK).is_file()
+    error = refuse(root, executed)
+    if other_checks == "removed":
+        assert error.exit_code == build_book.EXIT_BAD_EXECUTED_DIR
+        assert "notebook command" in str(error)
+    else:
+        assert error.exit_code == build_book.EXIT_FILE_ERROR
+    assert snapshot(executed) == before
+
+
+def test_what_the_script_does_not_own_is_listed_from_the_disk(tmp_path: Path) -> None:
+    stage = tmp_path / "stage"
+    write_files(
+        stage, ["_build/templates/t.txt", "_build/other/o.txt", "_build/site/s"]
     )
-    return root / "_build" / "executed"
+    owned = build_book.owned_by_others(stage, ["book/nb.ipynb"])
+    assert stage / "book" / "nb.ipynb" in owned
+    assert stage / "_build" / "templates" in owned
+    assert stage / "_build" / "other" in owned
+    assert stage / "_build" / "site" not in owned
+    assert stage / "_build" / "html" not in owned
 
 
-def scenario_stale_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    root = project_with_stale_stage(tmp_path)
-    copy = root / "_build" / "executed" / NOTEBOOK
-    os.utime(copy, (1.0, 1.0))
-    return root / "_build" / "executed"
-
-
-def scenario_failed_notebook(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    root = project_with_stale_stage(tmp_path)
-    write_timings(root, {NOTEBOOK: {"status": "error"}})
-    return root / "_build" / "executed"
-
-
-def scenario_toc_page_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    root = project_with_stale_stage(tmp_path)
-    path = root / "myst.yml"
-    path.write_text(
-        path.read_text(encoding="utf-8").replace("book/no_code.md", "Book/No_Code.md"),
-        encoding="utf-8",
+@pytest.mark.parametrize(
+    ("kind", "path", "allowed"),
+    [
+        ("remove", "_build/site", True),
+        ("remove", "_build/html", True),
+        ("remove", "_build", False),
+        ("remove", "_build/templates", False),
+        ("remove", "book", False),
+        ("remove", "book/nb.ipynb", False),
+        ("remove", "interactive", True),
+        ("copy", "book/nb.ipynb", False),
+        ("copy", "_build/templates/x.js", False),
+        ("copy", "book/page.md", True),
+    ],
+)
+def test_the_operations_that_touch_what_the_script_does_not_own_are_refused(
+    tmp_path: Path, kind: str, path: str, allowed: bool
+) -> None:
+    stage = tmp_path / "stage"
+    write_files(stage, ["_build/templates/t.txt", "book/nb.ipynb", "interactive/a"])
+    owned = build_book.owned_by_others(stage, ["book/nb.ipynb"])
+    source = tmp_path / "source.txt"
+    source.write_text("x", encoding="utf-8")
+    operation = build_book.StageOperation(
+        kind, stage / path, source if kind == "copy" else None
     )
-    return root / "_build" / "executed"
+    if allowed:
+        build_book.check_stage_operations(stage, [operation], owned)
+        return
+    with pytest.raises(build_book.BookError) as stop:
+        build_book.check_stage_operations(stage, [operation], owned)
+    assert stop.value.exit_code == build_book.EXIT_BAD_EXECUTED_DIR
 
 
-def scenario_executed_is_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    root = project_with_stale_stage(tmp_path)
-    return root
-
-
-REFUSING_SCENARIOS = {
-    "entry absent": scenario_static("absent"),
-    "entry outside": scenario_static("../outside"),
-    "entry data": scenario_static("data"),
-    "entry data/fresh": scenario_static("data/fresh"),
-    "entry _build": scenario_static("_build"),
-    "entry root": scenario_static("."),
-    "entry in another case": scenario_static("Interactive"),
-    "entry Data/fresh": scenario_static("Data/fresh"),
-    "entry holds the book folder": scenario_static("book"),
-    "entry is a page": scenario_static("book/no_code.md"),
-    "entry is a notebook": scenario_static("book/notebook_smoke.ipynb"),
-    "entry is the staging folder": scenario_entry_in_staging("out/stage"),
-    "entry is its parent": scenario_entry_in_staging("out"),
-    "link to a data file": scenario_link_to_file("data/fresh/secret.csv"),
-    "link to a page": scenario_link_to_file("book/page.md"),
-    "link to a file outside": scenario_link_to_file("../outside-repo.txt"),
-    "link to the data folder": scenario_link_to_folder("data/fresh"),
-    "link to the book folder": scenario_link_to_folder("book"),
-    "link to a folder outside": scenario_link_to_folder("../outside-dir"),
-    "staged path outside the root": scenario_not_placeable,
-    "copy older than its notebook": scenario_stale_copy,
-    "notebook recorded as failed": scenario_failed_notebook,
-    "page of the toc in another case": scenario_toc_page_case,
-    "staging folder is the root": scenario_executed_is_root,
-}
+def test_the_plan_lists_every_operation_below_the_staging_folder_and_changes_nothing(
+    tmp_path: Path,
+) -> None:
+    root = project_with_stale_stage(tmp_path, ["interactive"])
+    executed = root / "_build" / "executed"
+    outside = folder_outside(tmp_path)
+    before, beyond = snapshot(executed), snapshot(outside)
+    plan = build_book.plan_stage(root, executed)
+    assert snapshot(executed) == before
+    removals = [op.path for op in plan.operations if op.kind == "remove"]
+    assert removals == [
+        executed / "_build" / "site",
+        executed / "_build" / "html",
+        executed / "interactive",
+    ]
+    assert plan.operations[: len(removals)] == [
+        op for op in plan.operations if op.kind == "remove"
+    ]
+    owned = build_book.owned_by_others(executed, plan.notebooks)
+    for op in plan.operations:
+        assert executed in op.path.parents
+        assert not any(op.path == held or held in op.path.parents for held in owned)
+        between = [a for a in op.path.parents if executed in a.parents]
+        assert not any(folder.is_symlink() for folder in between)
+        assert not (op.kind == "copy" and op.path.is_symlink())
+    build_book.execute_stage(plan)
+    assert snapshot(outside) == beyond
 
 
 @pytest.mark.usefixtures("case_blind_disk")
-@pytest.mark.parametrize("name", sorted(REFUSING_SCENARIOS))
-def test_a_refused_build_leaves_the_staging_folder_as_it_found_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+def test_a_string_of_myst_yml_in_another_case_naming_a_staged_file_is_refused(
+    tmp_path: Path,
 ) -> None:
-    monkeypatch.delenv("BASE_URL", raising=False)
-    executed = REFUSING_SCENARIOS[name](tmp_path, monkeypatch)
-    root = tmp_path / "repo"
+    root = project_with_stale_stage(tmp_path)
+    add_to_myst(root, {"description": "Book/NO_CODE.md"}, {})
+    executed = root / "_build" / "executed"
     before = snapshot(executed)
-    assert before, "the scenario must leave something in the staging folder"
-    refuse(root, executed)
+    error = refuse(root, executed)
+    assert error.exit_code == build_book.EXIT_FILE_ERROR
+    assert "'Book/NO_CODE.md'" in str(error)
+    assert "book/no_code.md" in str(error)
+    assert "worded otherwise" in str(error)
     assert snapshot(executed) == before
+
+
+@pytest.mark.usefixtures("case_blind_disk")
+def test_a_string_of_myst_yml_in_another_case_that_nothing_stages_is_only_warned_of(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"])
+    write_files(root, ["notes/readme.txt"])
+    add_to_myst(root, {"description": "Notes/README.TXT"}, {})
+    build_book.stage_book(root, root / "_build" / "executed")
+    assert "Notes/README.TXT" in caplog.text
