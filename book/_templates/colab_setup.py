@@ -46,7 +46,8 @@ _ADVICE = (
     "fails, report the problem with the lines printed above."
 )
 # Printed before the install, because uv prints nothing while it downloads the packages.
-# Measured on Colab on two runs, the install took 55 s and 417 s, and the second one
+# Measured on Colab on two runs, the whole setup that follows this line (the install,
+# then the download of the data) took 88 s and 453 s, and the install of the second run
 # showed no new line for more than six minutes. The bounds of the sentence frame these
 # two runs with a margin; they are not a measured range: a heuristic.
 _INSTALL_NOTICE = (
