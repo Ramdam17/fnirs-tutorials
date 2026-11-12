@@ -30,7 +30,7 @@
   }
   .notice { margin: 0 0 12px; color: var(--tick); }
   .control { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin: 0 0 8px; }
-  .control label { font-weight: 600; min-width: 11em; }
+  .control .control-text { font-weight: 600; min-width: 11em; }
   .control input[type="range"] { flex: 1 1 200px; min-width: 160px; height: 32px; accent-color: var(--convolution); }
   #plot { width: 100%; }
   #plot svg { display: block; width: 100%; height: auto; }
@@ -50,7 +50,7 @@
 <p class="notice">This is a test page for the embedding path. The chapter on the haemodynamic response rebuilds this illustration with its sources.</p>
 
 <div class="control">
-  <label for="block-length">Block length: <output id="block-value" for="block-length" aria-live="off">10 s</output></label>
+  <span class="control-text"><label for="block-length">Block length</label>: <output id="block-value" for="block-length" aria-live="off">10 s</output></span>
   <input id="block-length" type="range" min="1" max="40" step="0.5" value="10" aria-describedby="response-area readout">
 </div>
 

@@ -717,3 +717,33 @@ def test_the_live_region_reader_finds_each_kind() -> None:
 def test_an_illustration_has_at_most_one_live_region(path: Path) -> None:
     regions = live_regions(path.read_text(encoding="utf-8"))
     assert len(regions) <= 1, f"{path.name} has several live regions: {regions}"
+
+
+# --------------------------------------------------------------------------------------
+# The accessible name of a control must not change when its value does
+# --------------------------------------------------------------------------------------
+
+_LABEL = re.compile(r"<label\b[^>]*>(.*?)</label>", re.IGNORECASE | re.DOTALL)
+
+
+def labels_with_markup(text: str) -> list[str]:
+    """Return the labels that hold a tag: an ``<output>`` or a ``<span>`` that changes.
+
+    The text of a ``<label>`` is the accessible name of its control. A value written inside
+    it makes the name change at each step, on top of the value text of the control.
+    """
+    return [m.group(0) for m in _LABEL.finditer(text) if "<" in m.group(1)]
+
+
+def test_the_label_reader_finds_a_value_inside_a_label() -> None:
+    inside = '<label for="a">Length: <output id="v">1 s</output></label>'
+    assert labels_with_markup(inside) == [inside]
+    assert (
+        labels_with_markup('<label for="a">Length</label>: <output>1 s</output>') == []
+    )
+
+
+@pytest.mark.parametrize("path", illustrations(), ids=lambda p: p.name)
+def test_an_illustration_names_its_controls_with_static_text(path: Path) -> None:
+    labels = labels_with_markup(path.read_text(encoding="utf-8"))
+    assert labels == [], f"{path.name} has a value or markup inside a label: {labels}"
