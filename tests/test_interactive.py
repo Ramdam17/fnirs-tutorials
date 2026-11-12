@@ -6,18 +6,26 @@ illustration loads anything from another host: a page of the book must work offl
 Colab and on the deployed site alike, and an illustration that fetched a script from a
 content-delivery network would break the day that address changes.
 
-A third assertion covers the one library the illustrations use, D3, which is copied into
-``interactive/vendor/``. The file is pinned by its size and its SHA-256, so that a changed
-or replaced library fails the suite, and a page may load a script only by a relative
-address that resolves to a file of that folder. The vendored file is not scanned by the
-detector below. It is third-party code that holds namespace strings and its own address in
-a comment, and ``fetch`` calls that run only if a page passes them an address; the scan of
-the pages covers that case, since a page that passed an external address would be found
-there.
+A third assertion covers the libraries the illustrations use, today D3 only, which are
+copied into ``interactive/vendor/``. They are an allow-list (``VENDORED``): each file is
+pinned by its version, its size and its SHA-256, so that a changed or replaced library
+fails the suite; a page may load a script only by a relative address that resolves to a
+file of the list; a file of that folder that is neither in the list nor a licence fails a
+test; and the version, size and hash that ``COMPAT.md`` and ``interactive/README.md`` give
+must equal the constants. The vendored file is not scanned by the detector below. It is
+third-party code that holds namespace strings and its own address in a comment, and
+``fetch`` calls that run only if a page passes them an address; the scan of the pages
+covers that case, since a page that passed an external address would be found there.
 
 The detector of the second assertion has its own tests, one per kind of load, because an
 assertion that a file holds no external load only means something when the detector is
 known to find one of each kind.
+
+What a static scan cannot see: the detector reads the text of a file. An address that is
+assembled at run time (pieces of text joined, a value read from data, a name built from
+user input) is not written in the file, so it is out of its reach, and so is a script
+that a vendored library loads by itself. A page that builds an address that way has to be
+reviewed by hand.
 
 When to use: run with the rest of the suite,
 ``uv run python -m pytest tests/test_interactive.py``.
@@ -31,6 +39,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -59,26 +68,37 @@ NAMESPACES = {
 _URL = r"(?:https?:|wss?:|ftp:)?//[^\s\"'`<>)\\]+"
 _EXTERNAL = re.compile(r"^(?:https?:|wss?:|ftp:)?//", re.IGNORECASE)
 
+# The value of an attribute, quoted or not: an optional opening quote, then the address up
+# to a space, a quote or the end of the tag.
+_VALUE = r"""\s*=\s*["']?\s*([^\s"'>]+)"""
+
 # Each pattern captures the address a kind of load asks for. They are tried on the text of
 # a file with its comments left in: an address in a comment is read as an address, which
 # errs on the side of refusing.
 _LOADS: dict[str, re.Pattern[str]] = {
-    "script": re.compile(r"<script\b[^>]*?\bsrc\s*=\s*[\"']([^\"']+)", re.IGNORECASE),
-    "stylesheet": re.compile(
-        r"<link\b[^>]*?\bhref\s*=\s*[\"']([^\"']+)[\"'][^>]*>", re.IGNORECASE
-    ),
+    "script": re.compile(rf"<script\b[^>]*?\bsrc{_VALUE}", re.IGNORECASE),
+    "stylesheet": re.compile(rf"<link\b[^>]*?\bhref{_VALUE}[^>]*>", re.IGNORECASE),
     "image": re.compile(
         r"<(?:img|image|source|video|audio|embed|track)\b[^>]*?"
-        r"\b(?:src|href|xlink:href|poster)\s*=\s*[\"']([^\"']+)",
+        rf"\b(?:src|href|xlink:href|poster){_VALUE}",
         re.IGNORECASE,
     ),
-    "srcset": re.compile(r"\bsrcset\s*=\s*[\"']([^\"']+)", re.IGNORECASE),
+    "srcset": re.compile(r"\bsrcset\s*=\s*[\"']?([^\"'>]+)", re.IGNORECASE),
     "frame": re.compile(
-        r"<(?:iframe|object)\b[^>]*?\b(?:src|data)\s*=\s*[\"']([^\"']+)", re.IGNORECASE
+        rf"<(?:iframe|object)\b[^>]*?\b(?:src|data){_VALUE}", re.IGNORECASE
+    ),
+    "base": re.compile(r"(<base\b[^>]*>)", re.IGNORECASE),
+    "form": re.compile(
+        rf"<(?:form|button|input)\b[^>]*?\b(?:action|formaction){_VALUE}", re.IGNORECASE
+    ),
+    "meta refresh": re.compile(
+        r"(?=<meta\b[^>]*\bhttp-equiv\s*=\s*[\"']?refresh)<meta\b[^>]*?"
+        r"\burl\s*=\s*[\"']?([^\"'>\s;]+)",
+        re.IGNORECASE,
     ),
     "css url": re.compile(r"url\(\s*[\"']?([^\"')]+)", re.IGNORECASE),
     "css import": re.compile(r"@import\s+[\"']([^\"']+)", re.IGNORECASE),
-    "fetch": re.compile(r"\bfetch\(\s*[\"'`]([^\"'`]+)"),
+    "fetch": re.compile(r"\bfetch\(\s*[\"'`]([^\"'`]+)", re.IGNORECASE),
     "dynamic import": re.compile(r"\bimport\(\s*[\"'`]([^\"'`]+)"),
     "static import": re.compile(r"\bimport\b[^;\n]*?\bfrom\s*[\"']([^\"']+)"),
     "import scripts": re.compile(r"\bimportScripts\(\s*[\"'`]([^\"'`]+)"),
@@ -87,9 +107,16 @@ _LOADS: dict[str, re.Pattern[str]] = {
     "request": re.compile(r"\.open\(\s*[\"'][A-Z]+[\"']\s*,\s*[\"'`]([^\"'`]+)"),
     "beacon": re.compile(r"\bsendBeacon\(\s*[\"'`]([^\"'`]+)"),
 }
-# A link the reader follows is not a load: it is requested only when clicked.
+# Kinds that are reported whatever their address, since the tag itself changes what the
+# page loads: a <base> moves every relative address, including that of the vendored script.
+_ALWAYS_REPORTED = {"base"}
+# A link the reader follows is not a load: it is requested only when clicked. Only the
+# href of an anchor is left out of the scan, so that what else the tag holds (a ping, an
+# onclick) is still read.
 _ANCHOR = re.compile(r"<a\b[^>]*>", re.IGNORECASE)
-_ADDRESS_LITERAL = re.compile(rf"[\"'`(]\s*({_URL})", re.IGNORECASE)
+_HREF = re.compile(r"""\bhref\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]*)""", re.IGNORECASE)
+# Any address after a quote, a backtick, a parenthesis or an equal sign.
+_ADDRESS_LITERAL = re.compile(rf"[\"'`(=]\s*({_URL})", re.IGNORECASE)
 
 
 def external_loads(text: str) -> list[tuple[str, str]]:
@@ -110,13 +137,16 @@ def external_loads(text: str) -> list[tuple[str, str]]:
         literal is reported as ``"address"``, because a script can hold an address in a
         variable and pass it to a function this detector does not know.
     """
-    without_links = _ANCHOR.sub("", text)
+    without_links = _ANCHOR.sub(lambda tag: _HREF.sub("", tag.group(0)), text)
     found: list[tuple[str, str]] = []
     for kind, pattern in _LOADS.items():
         for match in pattern.finditer(without_links):
             if kind == "stylesheet" and "stylesheet" not in match.group(0).lower():
                 continue
             values = match.group(1)
+            if kind in _ALWAYS_REPORTED:
+                found.append((kind, values))
+                continue
             # A srcset holds several addresses, each followed by a descriptor.
             candidates = (
                 [part.strip().split()[0] for part in values.split(",") if part.strip()]
@@ -166,6 +196,40 @@ CDN = "https://cdn.example.org/lib.js"
         ("request", f'<script>x.open("GET", "{CDN}");</script>'),
         ("beacon", f'<script>navigator.sendBeacon("{CDN}");</script>'),
         ("script", '<script src="//cdn.example.org/lib.js"></script>'),
+        # Unquoted values, for each kind of load.
+        ("script", f"<script src={CDN}></script>"),
+        ("script", f"<script defer src={CDN} async></script>"),
+        ("stylesheet", f"<link rel=stylesheet href={CDN}>"),
+        ("image", f"<img alt=x src={CDN}>"),
+        ("image", f"<video poster={CDN}></video>"),
+        ("srcset", f"<img srcset={CDN}>"),
+        ("frame", f"<iframe src={CDN}></iframe>"),
+        # Other tags and forms that reach another host.
+        ("meta refresh", f'<meta http-equiv="refresh" content="0; url={CDN}">'),
+        ("meta refresh", f"<meta content='5;URL={CDN}' http-equiv=refresh>"),
+        ("meta refresh", f"<meta http-equiv=refresh content=0;url={CDN}>"),
+        ("base", f'<base href="{CDN}">'),
+        ("base", '<base href="other/">'),
+        ("form", f'<form action="{CDN}" method="post"></form>'),
+        ("form", f"<form method=post action={CDN}></form>"),
+        ("form", f'<button formaction="{CDN}">go</button>'),
+        (
+            "css url",
+            f"<style>@font-face {{ font-family: f; src: url({CDN}); }}</style>",
+        ),
+        (
+            "css url",
+            "<style>@font-face { src: url(//fonts.example.org/f.woff2); }</style>",
+        ),
+        ("script", '<SCRIPT SRC="HTTPS://CDN.EXAMPLE.ORG/LIB.JS"></SCRIPT>'),
+        ("fetch", '<script>fetch("HTTPS://example.org/x");</script>'),
+        ("address", f"<script>const u = `{CDN}`;</script>"),
+        ("address", "<script>const u = `https://example.org/${name}.json`;</script>"),
+        # What follows `<a` in the same tag is scanned, only the href is a link.
+        ("address", f'<a href="#" onclick="location=\'{CDN}\'">x</a>'),
+        ("address", f'<a href="#" ping="{CDN}">x</a>'),
+        ("address", f"<a href=# ping={CDN}>x</a>"),
+        ("fetch", f'<a onclick="fetch(`{CDN}`)" href="#">x</a>'),
     ],
 )
 def test_the_detector_finds_each_kind_of_external_load(kind: str, snippet: str) -> None:
@@ -193,6 +257,12 @@ def test_the_detector_finds_an_address_kept_in_a_variable() -> None:
         '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"></svg>',
         '<script>document.createElementNS("http://www.w3.org/2000/svg", "g");</script>',
         '<a href="https://example.org/paper">A paper</a>',
+        "<a href=https://example.org/paper>A paper</a>",
+        "<a class='x' href='https://example.org/paper' target=_blank>A paper</a>",
+        '<meta charset="utf-8">',
+        '<meta http-equiv="refresh" content="0; url=other.html">',
+        '<form action="submit.html"></form>',
+        "<script src=vendor/d3.min.js></script>",
         "<script>// see https://example.org is not a quoted address\n</script>",
     ],
 )
@@ -256,14 +326,54 @@ def test_a_page_of_the_book_embeds_at_least_one_illustration() -> None:
     assert embedded_sources(), "no page of the table of contents embeds an illustration"
 
 
+def embedded_problem(source: str, interactive_dir: Path) -> str | None:
+    """Say why the target of an embedded source is not a file of ``interactive_dir``.
+
+    The name must be the one the folder lists, letter for letter: the Mac ignores case
+    in its default file system and the Linux runner and the host do not, so a source
+    written ``Banana.html`` for ``banana.html`` would pass here and be a 404 once deployed.
+    """
+    relative = source[len(SOURCE_PREFIX) :]
+    target = (interactive_dir / relative).resolve()
+    if not target.is_relative_to(interactive_dir.resolve()):
+        return "it leaves the folder"
+    if not build_book._has_exact_names(interactive_dir, relative.split("/")):
+        return "no file has exactly this name"
+    if not target.is_file():
+        return "the target is not a file"
+    return None
+
+
 @pytest.mark.parametrize(("page", "source"), embedded_sources())
 def test_every_illustration_a_page_embeds_exists(page: str, source: str) -> None:
-    relative = source[len(SOURCE_PREFIX) :]
-    target = (INTERACTIVE_DIR / relative).resolve()
-    assert target.is_relative_to(INTERACTIVE_DIR.resolve()), (
-        f"{page}: {source} leaves the folder"
-    )
-    assert target.is_file(), f"{page} embeds {source}, but {target} does not exist"
+    problem = embedded_problem(source, INTERACTIVE_DIR)
+    assert problem is None, f"{page} embeds {source}: {problem}"
+
+
+def test_an_embedded_source_must_match_the_name_of_the_file_letter_for_letter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "banana.html").write_text("x", encoding="utf-8")
+    assert embedded_problem("/interactive/sub/banana.html", tmp_path) is None
+    # Make the file system ignore case, as the Mac's does, so that this test checks the
+    # exact-name rule on the Linux runner too.
+    real_is_file = Path.is_file
+
+    def ignoring_case(self: Path) -> bool:
+        if real_is_file(self):
+            return True
+        parent = self.parent
+        return parent.is_dir() and any(
+            p.name.lower() == self.name.lower() and real_is_file(p)
+            for p in parent.iterdir()
+        )
+
+    monkeypatch.setattr(Path, "is_file", ignoring_case)
+    for wrong in ("/interactive/sub/Banana.html", "/interactive/SUB/banana.html"):
+        problem = embedded_problem(wrong, tmp_path)
+        assert problem is not None and "exactly" in problem, wrong
+    assert embedded_problem("/interactive/sub/absent.html", tmp_path) is not None
 
 
 @pytest.mark.parametrize("path", illustrations(), ids=lambda p: p.name)
@@ -281,10 +391,29 @@ def test_there_is_an_illustration_to_check() -> None:
 # --------------------------------------------------------------------------------------
 
 VENDOR_DIR = INTERACTIVE_DIR / "vendor"
-D3_VERSION = "7.9.2"
-# dist/d3.min.js of the npm package d3 at the version above.
-D3_SIZE_BYTES = 280_622
-D3_SHA256 = "912111098ea99503a6f4967361d2bbdc9dbf58cf9c678c8e27e5b02d1a07f0c1"
+
+
+class Vendored(NamedTuple):
+    """The pin of a vendored file: what it is, and what it must weigh and hash to."""
+
+    version: str
+    size: int
+    sha256: str
+
+
+# The allow-list. A page may load a script only if it resolves to a file named here, and a
+# file under vendor/ that is neither named here nor a licence fails a test, so a second
+# library cannot arrive without a pin. d3.min.js is dist/d3.min.js of the npm package d3.
+VENDORED: dict[str, Vendored] = {
+    "d3.min.js": Vendored(
+        "7.9.2",
+        280_622,
+        "912111098ea99503a6f4967361d2bbdc9dbf58cf9c678c8e27e5b02d1a07f0c1",
+    ),
+}
+LICENCE_NAMES = {"LICENSE"}
+D3 = VENDORED["d3.min.js"]
+D3_VERSION, D3_SIZE_BYTES, D3_SHA256 = D3
 
 
 def sha256_of(path: Path) -> str:
@@ -303,11 +432,78 @@ def library_problem(path: Path, size: int, digest: str) -> str | None:
     return None
 
 
-def test_the_vendored_d3_is_the_recorded_version() -> None:
-    problem = library_problem(VENDOR_DIR / "d3.min.js", D3_SIZE_BYTES, D3_SHA256)
-    assert problem is None, f"D3 {D3_VERSION}: {problem}"
+def test_every_vendored_file_is_the_recorded_version() -> None:
+    for name, pin in VENDORED.items():
+        problem = library_problem(VENDOR_DIR / name, pin.size, pin.sha256)
+        assert problem is None, f"{name} {pin.version}: {problem}"
+
+
+def test_the_vendored_d3_header_names_the_recorded_version() -> None:
     header = (VENDOR_DIR / "d3.min.js").read_text(encoding="utf-8").splitlines()[0]
     assert f"v{D3_VERSION}" in header
+
+
+def vendor_files() -> list[str]:
+    """Paths under ``vendor/`` relative to it, as published; hidden files are left out."""
+    return sorted(
+        p.relative_to(VENDOR_DIR).as_posix()
+        for p in VENDOR_DIR.rglob("*")
+        if p.is_file() and not any(part.startswith(".") for part in p.parts)
+    )
+
+
+def unpinned(files: list[str]) -> list[str]:
+    """The files that are neither in the allow-list nor a licence."""
+    return [f for f in files if f not in VENDORED and Path(f).name not in LICENCE_NAMES]
+
+
+def test_a_file_under_vendor_is_in_the_allow_list_or_a_licence() -> None:
+    assert unpinned(vendor_files()) == []
+
+
+def test_a_second_library_without_a_pin_is_found() -> None:
+    assert unpinned(["d3.min.js", "LICENSE", "lodash.min.js", "sub/x.js"]) == [
+        "lodash.min.js",
+        "sub/x.js",
+    ]
+
+
+def test_the_allow_list_holds_d3_only() -> None:
+    assert list(VENDORED) == ["d3.min.js"]
+
+
+def _pins_in(text: str) -> tuple[str, int, str]:
+    """Read the version, the size in bytes and the SHA-256 that a sentence of a document gives."""
+    version = re.search(r"\bD3\b[^.\d]*(\d+\.\d+\.\d+)", text)
+    size = re.search(r"([\d,]+) bytes", text)
+    digest = re.search(r"\b([0-9a-f]{64})\b", text)
+    assert version and size and digest, f"no version, size and SHA-256 in: {text!r}"
+    return version.group(1), int(size.group(1).replace(",", "")), digest.group(1)
+
+
+def _line_with(path: Path, needle: str) -> str:
+    lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if needle in ln]
+    assert lines, f"{path.name} has no line with {needle!r}"
+    return lines[0]
+
+
+@pytest.mark.parametrize(
+    ("document", "needle"),
+    [
+        (REPO_ROOT / "COMPAT.md", "| D3 "),
+        (INTERACTIVE_DIR / "README.md", "drawn with D3"),
+    ],
+    ids=["COMPAT.md", "README.md"],
+)
+def test_the_documents_give_the_version_size_and_hash_of_the_constants(
+    document: Path, needle: str
+) -> None:
+    assert _pins_in(_line_with(document, needle)) == tuple(D3)
+
+
+def test_a_document_that_differs_from_the_constants_is_found() -> None:
+    line = f"D3 9.9.9 (1 bytes, SHA-256 `{'0' * 64}`)"
+    assert _pins_in(line) != tuple(D3)
 
 
 def test_the_vendored_d3_comes_with_its_licence() -> None:
@@ -329,12 +525,19 @@ def test_a_changed_or_missing_library_is_reported(tmp_path: Path) -> None:
     assert missing is not None and "does not exist" in missing
 
 
-def script_problem(page: Path, source: str, vendor_dir: Path) -> str | None:
+def script_problem(
+    page: Path,
+    source: str,
+    vendor_dir: Path,
+    allowed: dict[str, Vendored] | None = None,
+) -> str | None:
     """Say why a ``<script src>`` is not allowed, or return None.
 
     A script is allowed when its source is a relative address that resolves, from the
-    folder of the page, to an existing file under ``vendor_dir``.
+    folder of the page, to an existing file of ``allowed`` (by default ``VENDORED``)
+    directly under ``vendor_dir``.
     """
+    allowed = VENDORED if allowed is None else allowed
     if _EXTERNAL.match(source) or re.match(
         r"^[a-z][a-z0-9+.-]*:", source, re.IGNORECASE
     ):
@@ -346,6 +549,8 @@ def script_problem(page: Path, source: str, vendor_dir: Path) -> str | None:
         return "it does not resolve to a file under vendor/"
     if not target.is_file():
         return "the file does not exist"
+    if target.relative_to(vendor_dir.resolve()).as_posix() not in allowed:
+        return "it is not a file of the allow-list of vendored files"
     return None
 
 
@@ -366,12 +571,24 @@ def fake_site(tmp_path: Path) -> tuple[Path, Path]:
     return folder / "page.html", folder / "vendor"
 
 
-def test_a_relative_script_under_vendor_is_allowed(
+LIB = {"lib.js": Vendored("1", 1, "0" * 64)}
+
+
+def test_a_relative_script_of_the_allow_list_is_allowed(
     fake_site: tuple[Path, Path],
 ) -> None:
     page, vendor = fake_site
-    assert script_problem(page, "vendor/lib.js", vendor) is None
-    assert script_problem(page, "./vendor/lib.js", vendor) is None
+    assert script_problem(page, "vendor/lib.js", vendor, LIB) is None
+    assert script_problem(page, "./vendor/lib.js", vendor, LIB) is None
+
+
+def test_a_script_under_vendor_that_is_not_in_the_allow_list_is_refused(
+    fake_site: tuple[Path, Path],
+) -> None:
+    page, vendor = fake_site
+    (vendor / "unpinned.js").write_text("x", encoding="utf-8")
+    problem = script_problem(page, "vendor/unpinned.js", vendor, LIB)
+    assert problem is not None and "allow-list" in problem
 
 
 @pytest.mark.parametrize(
@@ -395,7 +612,7 @@ def test_any_other_script_is_refused_with_its_reason(
     fake_site: tuple[Path, Path], source: str, fragment: str
 ) -> None:
     page, vendor = fake_site
-    problem = script_problem(page, source, vendor)
+    problem = script_problem(page, source, vendor, LIB)
     assert problem is not None and fragment in problem
 
 
@@ -405,6 +622,27 @@ def test_the_script_tags_of_a_page_are_all_read() -> None:
         "<script defer src='vendor/b.js'></script><script>inline()</script>"
     )
     assert script_sources(text) == ["vendor/a.js", "vendor/b.js"]
+
+
+def test_an_unquoted_script_source_is_read_and_refused(
+    fake_site: tuple[Path, Path],
+) -> None:
+    page, vendor = fake_site
+    text = (
+        "<script src=https://cdn.example.org/lib.js></script>"
+        "<script defer src=vendor/lib.js async></script>"
+        "<SCRIPT SRC = 'other/lib.js'></SCRIPT>"
+    )
+    sources = script_sources(text)
+    assert sources == [
+        "https://cdn.example.org/lib.js",
+        "vendor/lib.js",
+        "other/lib.js",
+    ]
+    problems = [script_problem(page, source, vendor, LIB) for source in sources]
+    assert problems[0] is not None and "scheme" in problems[0]
+    assert problems[1] is None
+    assert problems[2] is not None
 
 
 @pytest.mark.parametrize("path", illustrations(), ids=lambda p: p.name)
