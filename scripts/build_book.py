@@ -481,7 +481,21 @@ def _local_target(raw: str, page: Path, root: Path) -> Path | None:
         logger.warning("%s: reference %r points outside the repository", page, raw)
         return None
     # Every string of myst.yml comes here, prose included, so the name can be anything.
-    return candidate if is_file_or_absent(candidate) else None
+    if not is_file_or_absent(candidate):
+        return None
+    spelled = spell_as_on_disk(candidate)
+    if spelled != candidate:
+        # A host that tells case apart would not find this file: the reference is left
+        # unresolved, as it would be there, and MyST then reports it under --strict.
+        logger.warning(
+            "%s: reference %r is spelled differently from the file the disk names %s; "
+            "a case-sensitive host would not find it, so it is not staged",
+            page,
+            raw,
+            spelled,
+        )
+        return None
+    return candidate
 
 
 def _page_text(path: Path) -> str:
@@ -631,6 +645,14 @@ def _refuse_links_out_of(folder: Path, myst_path: Path) -> None:
         if not entry.is_symlink():
             continue
         target = entry.resolve()
+        spelled = spell_as_on_disk(target)
+        if spelled != target:
+            raise BookError(
+                EXIT_FILE_ERROR,
+                f"{entry} in a static folder of {myst_path} is a link to {target}, "
+                f"which the disk spells {spelled}. A host that tells case apart would "
+                "find no file there; write the target as the disk spells it.",
+            )
         if target != folder and folder not in target.parents:
             raise BookError(
                 EXIT_FILE_ERROR,
@@ -662,6 +684,15 @@ def static_entry_paths(
     paths: list[Path] = []
     for entry in entries:
         path = (myst_path.parent / entry).resolve()
+        spelled = spell_as_on_disk(path)
+        if spelled != path:
+            raise BookError(
+                EXIT_FILE_ERROR,
+                f"static_files entry {entry!r} of {myst_path} is spelled differently "
+                f"from the path the disk names, {spelled}. This disk ignores case; the "
+                "Linux runner and GitHub Pages do not, and there the entry names no "
+                "file. Write it as the disk spells it.",
+            )
         try:
             relative = path.relative_to(root.resolve())
         except ValueError:
@@ -741,6 +772,27 @@ def check_static_entries(
                 )
 
 
+def static_copy_of(root: Path, executed_dir: Path, entry: Path) -> Path:
+    """Return the place in the staging folder where the copy of a static entry lies.
+
+    Raises
+    ------
+    BookError
+        With ``EXIT_BAD_EXECUTED_DIR`` when that place is not inside the staging folder,
+        for example because a folder of the path is a link that leads out of it.
+    """
+    stage = executed_dir.resolve()
+    copy = executed_dir / entry.relative_to(root.resolve())
+    parent = copy.parent.resolve()
+    if parent != stage and stage not in parent.parents:
+        raise BookError(
+            EXIT_BAD_EXECUTED_DIR,
+            f"the staged copy {copy} of a static entry is not inside the staging "
+            f"folder {executed_dir}; nothing was removed.",
+        )
+    return copy
+
+
 def remove_stale_static(
     root: Path, executed_dir: Path, entries: list[Path]
 ) -> list[Path]:
@@ -780,17 +832,9 @@ def remove_stale_static(
         With ``EXIT_BAD_EXECUTED_DIR`` when a copy to remove is not inside the staging
         folder.
     """
-    stage = executed_dir.resolve()
     removed: list[Path] = []
     for entry in entries:
-        copy = executed_dir / entry.relative_to(root.resolve())
-        parent = copy.parent.resolve()
-        if parent != stage and stage not in parent.parents:
-            raise BookError(
-                EXIT_BAD_EXECUTED_DIR,
-                f"the staged copy {copy} of a static entry is not inside the staging "
-                f"folder {executed_dir}; nothing was removed.",
-            )
+        copy = static_copy_of(root, executed_dir, entry)
         if copy.is_symlink() or copy.is_file():
             copy.unlink()
         elif copy.is_dir():
@@ -847,8 +891,9 @@ def find_static_files(
             if any(part.startswith(".") or part == "__pycache__" for part in parts):
                 logger.info("Not staged (hidden or cache file): %s", candidate)
                 continue
-            if candidate not in found:
-                found.append(candidate)
+            spelled = on_disk(candidate)
+            if spelled not in found:
+                found.append(spelled)
     return found
 
 
@@ -871,6 +916,35 @@ def remove_stale_site(stage_dir: Path) -> list[Path]:
             shutil.rmtree(path)
             removed.append(path)
     return removed
+
+
+def check_toc_spelling(root: Path, toc_files: list[str], myst_path: Path) -> None:
+    """Refuse an entry of the table of contents that the disk spells differently.
+
+    On a disk that ignores case the notebook command and MyST find ``Book/Page.md`` for
+    ``book/page.md``; the Linux runner does not, and the book would not build there.
+    The entry is compared with :func:`spell_as_on_disk` of the path it names; an entry
+    that names no file is left to MyST, which reports it.
+
+    Raises
+    ------
+    BookError
+        With ``EXIT_BAD_TOC``, naming the entry and the spelling of the disk.
+    """
+    for name in toc_files:
+        try:
+            target = (root / name).resolve()
+        except OSError:
+            continue
+        spelled = spell_as_on_disk(target)
+        if spelled != target:
+            raise BookError(
+                EXIT_BAD_TOC,
+                f"the table of contents of {myst_path} names {name!r}, which the disk "
+                f"spells {spelled.relative_to(root.resolve()).as_posix()!r}. This disk "
+                "ignores case; the Linux runner and GitHub Pages do not, and there the "
+                "page would not be found. Write the entry as the disk spells it.",
+            )
 
 
 def check_executed_dir(root: Path, executed_dir: Path) -> None:
@@ -896,6 +970,165 @@ def check_executed_dir(root: Path, executed_dir: Path) -> None:
         )
 
 
+@dataclass
+class PlannedCopy:
+    """One file to stage: where it is read and where it is written.
+
+    Attributes
+    ----------
+    source : Path
+        File of the repository to read.
+    relative : Path
+        Path of the file below the repository root, which is also its path below the
+        staging folder.
+    destination : Path
+        ``executed_dir / relative``.
+    """
+
+    source: Path
+    relative: Path
+    destination: Path
+
+
+@dataclass
+class StagePlan:
+    """What a build will stage, with every refusal already made.
+
+    Attributes
+    ----------
+    root, executed_dir : Path
+        Repository root and staging folder.
+    toc_files, notebooks : list of str
+        Files of the table of contents, and the notebooks among them.
+    static_entries : list of Path
+        The entries of ``project.static_files``; their staged copies are removed first.
+    copies : list of PlannedCopy
+        The files to copy, each destination once.
+    """
+
+    root: Path
+    executed_dir: Path
+    toc_files: list[str]
+    notebooks: list[str]
+    static_entries: list[Path]
+    copies: list[PlannedCopy]
+
+
+def plan_stage(root: Path, executed_dir: Path) -> StagePlan:
+    """Read ``myst.yml``, the pages and the folders, and decide what is staged.
+
+    This function writes and removes nothing. Every refusal of the staging is made
+    here, so that a refused build leaves the staging folder as it found it: the table of
+    contents and its spelling, the executed copies, the static entries, what a static
+    entry holds (links that lead out of the folder included), and the destination of
+    each source. ``root`` and ``executed_dir`` must have gone through :func:`on_disk`.
+
+    The staging folder is owned as follows. The executed copies belong to the notebook
+    command and are never removed here. ``_build/site``, ``_build/html`` and the staged
+    copy of each static entry are the script's and are removed by :func:`execute_stage`,
+    after this function has returned.
+
+    Parameters
+    ----------
+    root : Path
+        Repository root, holding ``myst.yml``.
+    executed_dir : Path
+        Folder of the executed copies; it becomes the staging folder.
+
+    Returns
+    -------
+    StagePlan
+        The files to stage.
+
+    Raises
+    ------
+    BookError
+        If the table of contents is refused, a notebook has no fresh executed copy, a
+        static entry or a link of a static folder is refused, or a source cannot be
+        placed under the repository.
+    """
+    myst_path = root / "myst.yml"
+    toc_files, notebooks = read_toc_files(myst_path)
+    check_toc_spelling(root, toc_files, myst_path)
+    check_executed_copies(root, executed_dir, notebooks)
+    document = load_myst_document(myst_path)
+    static_entries = static_entry_paths(document, myst_path, root)
+    check_static_entries(root, executed_dir, static_entries, toc_files, myst_path)
+    for entry in static_entries:
+        static_copy_of(root, executed_dir, entry)
+    sources = [myst_path]
+    for name in toc_files:
+        page = root / name
+        if name in notebooks:
+            sources.extend(find_referenced_files(page, root))
+            continue
+        if not is_file_or_absent(page):
+            # MyST reports a missing page itself; the check then finds no built page.
+            logger.warning("Page %s of the table of contents does not exist", name)
+            continue
+        sources.append(page)
+        sources.extend(find_referenced_files(page, root))
+    for config_file in find_config_files(document, myst_path, root):
+        sources.append(config_file)
+        if config_file.suffix.lower() == ".md":
+            sources.extend(find_referenced_files(config_file, root))
+    sources.extend(find_static_files(document, myst_path, root))
+    copies: list[PlannedCopy] = []
+    seen: set[Path] = set()
+    for source in sources:
+        resolved = source.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            relative = resolved.relative_to(root.resolve())
+        except ValueError:
+            raise BookError(
+                EXIT_FILE_ERROR,
+                f"cannot stage {source}: it resolves to {resolved}, which is not "
+                f"under the repository {root}.",
+            ) from None
+        copies.append(PlannedCopy(source, relative, executed_dir / relative))
+    return StagePlan(root, executed_dir, toc_files, notebooks, static_entries, copies)
+
+
+def execute_stage(plan: StagePlan) -> StagedBook:
+    """Remove what an earlier build left, then copy the files of the plan.
+
+    It raises only for what the disk does: a file that cannot be removed, read or
+    written. Every refusal was made by :func:`plan_stage`.
+
+    Returns
+    -------
+    StagedBook
+        The files staged.
+    """
+    staged = StagedBook(
+        stage_dir=plan.executed_dir,
+        toc_files=plan.toc_files,
+        notebooks=plan.notebooks,
+    )
+    for removed in remove_stale_site(plan.executed_dir):
+        logger.info("Removed %s from an earlier build", removed)
+    for removed in remove_stale_static(
+        plan.root, plan.executed_dir, plan.static_entries
+    ):
+        logger.info("Removed %s from an earlier build", removed)
+    for item in plan.copies:
+        try:
+            item.destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(item.source, item.destination)
+        except OSError as error:
+            raise BookError(
+                EXIT_FILE_ERROR,
+                f"cannot stage {item.relative.as_posix()} to {item.destination}: "
+                f"{type(error).__name__}: {error}",
+            ) from error
+        staged.copied.append(item.relative)
+        logger.info("Staged %s", item.relative.as_posix())
+    return staged
+
+
 def stage_book(root: Path, executed_dir: Path) -> StagedBook:
     """Stage ``myst.yml``, the non-notebook pages and their references.
 
@@ -906,6 +1139,9 @@ def stage_book(root: Path, executed_dir: Path) -> StagedBook:
     staging folder holds their executed copies. The target of an ``{iframe}`` is not found
     by reading the page: it is staged because it lies in a static folder, and MyST
     publishes that folder.
+
+    It is :func:`plan_stage`, which refuses without touching the disk, followed by
+    :func:`execute_stage`, which removes and copies.
 
     Parameters
     ----------
@@ -922,67 +1158,9 @@ def stage_book(root: Path, executed_dir: Path) -> StagedBook:
     Raises
     ------
     BookError
-        If the table of contents is refused, a notebook has no fresh executed copy, or
-        a file cannot be read or copied.
+        See :func:`plan_stage` and :func:`execute_stage`.
     """
-    myst_path = root / "myst.yml"
-    toc_files, notebooks = read_toc_files(myst_path)
-    check_executed_copies(root, executed_dir, notebooks)
-    staged = StagedBook(
-        stage_dir=executed_dir, toc_files=toc_files, notebooks=notebooks
-    )
-    static_entries = static_entry_paths(load_myst_document(myst_path), myst_path, root)
-    check_static_entries(root, executed_dir, static_entries, toc_files, myst_path)
-    for removed in remove_stale_site(executed_dir):
-        logger.info("Removed %s from an earlier build", removed)
-    for removed in remove_stale_static(root, executed_dir, static_entries):
-        logger.info("Removed %s from an earlier build", removed)
-    sources = [myst_path]
-    for name in toc_files:
-        page = root / name
-        if name in notebooks:
-            sources.extend(find_referenced_files(page, root))
-            continue
-        if not is_file_or_absent(page):
-            # MyST reports a missing page itself; the check then finds no built page.
-            logger.warning("Page %s of the table of contents does not exist", name)
-            continue
-        sources.append(page)
-        sources.extend(find_referenced_files(page, root))
-    for config_file in find_config_files(
-        load_myst_document(myst_path), myst_path, root
-    ):
-        sources.append(config_file)
-        if config_file.suffix.lower() == ".md":
-            sources.extend(find_referenced_files(config_file, root))
-    sources.extend(find_static_files(load_myst_document(myst_path), myst_path, root))
-    copied: set[Path] = set()
-    for source in sources:
-        resolved = source.resolve()
-        if resolved in copied:
-            continue
-        copied.add(resolved)
-        try:
-            relative = resolved.relative_to(root.resolve())
-        except ValueError:
-            raise BookError(
-                EXIT_FILE_ERROR,
-                f"cannot stage {source}: it resolves to {resolved}, which is not "
-                f"under the repository {root}.",
-            ) from None
-        destination = executed_dir / relative
-        try:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
-        except OSError as error:
-            raise BookError(
-                EXIT_FILE_ERROR,
-                f"cannot stage {relative.as_posix()} to {destination}: "
-                f"{type(error).__name__}: {error}",
-            ) from error
-        staged.copied.append(relative)
-        logger.info("Staged %s", relative.as_posix())
-    return staged
+    return execute_stage(plan_stage(root, executed_dir))
 
 
 def run_jupyter_book(stage_dir: Path) -> int:
@@ -1557,8 +1735,8 @@ def main(argv: Sequence[str] | None = None, runner: Runner = run_jupyter_book) -
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
-    root = args.root.resolve()
-    executed_dir = (args.executed_dir or root / EXECUTED_SUBDIR).resolve()
+    root = on_disk(args.root)
+    executed_dir = on_disk(args.executed_dir or root / EXECUTED_SUBDIR)
     try:
         staged = build_book(root, executed_dir, runner)
     except BookError as error:

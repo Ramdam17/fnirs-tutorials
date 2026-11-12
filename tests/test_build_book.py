@@ -2136,3 +2136,141 @@ def test_a_path_that_cannot_be_listed_is_kept_as_given(tmp_path: Path) -> None:
     write_files(tmp_path, ["file.txt"])
     asked = tmp_path.resolve() / "FILE.txt" / "below"
     assert build_book.on_disk(asked) == tmp_path.resolve() / "file.txt" / "below"
+
+
+# --------------------------------------------------------------------------------------
+# Every path that enters the script is checked once, and a spelling the disk does not
+# give is refused as the case-sensitive host would
+# --------------------------------------------------------------------------------------
+
+
+def snapshot(folder: Path) -> dict[str, bytes | None]:
+    """Return every file and folder under ``folder`` with its content (None for a folder)."""
+    if not folder.exists():
+        return {}
+    return {
+        p.relative_to(folder).as_posix(): p.read_bytes() if p.is_file() else None
+        for p in sorted(folder.rglob("*"))
+    }
+
+
+def project_with_stale_stage(tmp_path: Path, static: list[str] | None = None) -> Path:
+    """Make a project whose staging folder holds what an earlier build left."""
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"])
+    write_files(root, ["interactive/a.html", "interactive/Vendor/d3.js"])
+    if static is not None:
+        add_to_myst(root, {"static_files": static}, {})
+    write_files(
+        root / "_build" / "executed",
+        [
+            "_build/site/content/stale.json",
+            "_build/html/stale.html",
+            "interactive/old.html",
+        ],
+    )
+    return root
+
+
+def refuse(root: Path, executed: Path) -> build_book.BookError:
+    """Run the whole build on a project and return the refusal."""
+    runner = FakeBuild([])
+    with pytest.raises(build_book.BookError) as stop:
+        build_book.build_book(root, executed, runner)
+    assert runner.calls == []
+    return stop.value
+
+
+@pytest.mark.usefixtures("case_blind_disk")
+@pytest.mark.parametrize(
+    "entry", ["Interactive", "INTERACTIVE/Vendor", "interactive/VENDOR"]
+)
+def test_a_static_entry_spelled_with_another_case_is_refused(
+    tmp_path: Path, entry: str
+) -> None:
+    root = project_with_stale_stage(tmp_path, [entry])
+    error = refuse(root, root / "_build" / "executed")
+    assert error.exit_code == build_book.EXIT_FILE_ERROR
+    assert repr(entry) in str(error)
+    assert "spelled" in str(error)
+
+
+@pytest.mark.usefixtures("case_blind_disk")
+def test_a_static_entry_under_data_in_another_case_is_refused(tmp_path: Path) -> None:
+    root = project_with_stale_stage(tmp_path, ["Data/fresh"])
+    write_files(root, ["data/fresh/small.csv"])
+    error = refuse(root, root / "_build" / "executed")
+    assert error.exit_code == build_book.EXIT_FILE_ERROR
+    assert "Data/fresh" in str(error)
+    assert not (root / "_build" / "executed" / "data").exists()
+
+
+@pytest.mark.usefixtures("case_blind_disk")
+def test_a_page_of_the_table_of_contents_spelled_with_another_case_is_refused(
+    tmp_path: Path,
+) -> None:
+    root = project_with_stale_stage(tmp_path)
+    path = root / "myst.yml"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("book/no_code.md", "Book/No_Code.md"),
+        encoding="utf-8",
+    )
+    error = refuse(root, root / "_build" / "executed")
+    assert error.exit_code == build_book.EXIT_BAD_TOC
+    assert "Book/No_Code.md" in str(error)
+    assert "book/no_code.md" in str(error)
+
+
+@pytest.mark.usefixtures("case_blind_disk")
+def test_a_reference_spelled_with_another_case_is_not_staged_and_is_warned_of(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = make_project(
+        tmp_path,
+        ["notebook_smoke", "no_code"],
+        texts={"no_code": "![figure](/Images/FIG.png)\n"},
+    )
+    write_files(root, ["images/fig.png"])
+    staged = build_book.stage_book(root, root / "_build" / "executed")
+    assert Path("images/fig.png") not in staged.copied
+    assert "images/fig.png" in caplog.text
+    assert "/Images/FIG.png" in caplog.text
+
+
+@pytest.mark.usefixtures("case_blind_disk")
+def test_a_string_of_myst_yml_that_names_a_file_in_another_case_is_ignored(
+    tmp_path: Path,
+) -> None:
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"])
+    write_files(root, ["plugins/p.mjs"])
+    add_to_myst(root, {"plugins": ["Plugins/P.MJS"]}, {})
+    staged = build_book.stage_book(root, root / "_build" / "executed")
+    assert not [c for c in staged.copied if c.as_posix().casefold() == "plugins/p.mjs"]
+
+
+@pytest.mark.usefixtures("case_blind_disk")
+def test_a_link_whose_target_is_spelled_with_another_case_is_refused(
+    tmp_path: Path,
+) -> None:
+    root = project_with_stale_stage(tmp_path, ["interactive"])
+    (root / "interactive" / "alias.js").symlink_to(
+        root / "interactive" / "VENDOR" / "D3.JS"
+    )
+    error = refuse(root, root / "_build" / "executed")
+    assert error.exit_code == build_book.EXIT_FILE_ERROR
+    assert "alias.js" in str(error)
+    assert "spells" in str(error)
+
+
+@pytest.mark.usefixtures("case_blind_disk")
+def test_a_staging_folder_that_is_the_root_in_another_case_is_refused(
+    tmp_path: Path,
+) -> None:
+    root = project_with_stale_stage(tmp_path)
+    spelled = root.parent / "REPO"
+    assert build_book.on_disk(spelled) == root
+    runner = FakeBuild([])
+    code = build_book.main(
+        ["--root", str(root), "--executed-dir", str(spelled)], runner=runner
+    )
+    assert code == build_book.EXIT_BAD_EXECUTED_DIR
+    assert runner.calls == []
