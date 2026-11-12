@@ -1200,7 +1200,11 @@ def test_the_real_page_files_with_a_frame_outside_the_rule_are_refused(
         ("", ""),
         ("/fnirs-tutorials", "/fnirs-tutorials"),
         ("/fnirs-tutorials/", "/fnirs-tutorials"),
-        ("  /fnirs-tutorials//  ", "/fnirs-tutorials"),
+        ("/fnirs-tutorials//", "/fnirs-tutorials"),
+        # Spaces are not stripped: MyST and the plugin receive them, so the script must
+        # see them to refuse the value.
+        ("  /fnirs-tutorials//  ", "  /fnirs-tutorials//  "),
+        ("  ", "  "),
         ("/", ""),
     ],
 )
@@ -1693,7 +1697,21 @@ def test_the_refusal_of_a_base_url_gives_the_value_and_the_accepted_form(
     assert "/fnirs-tutorials" in str(stop.value)
 
 
-@pytest.mark.parametrize("raw", [None, "", "  ", "/", "/fnirs-tutorials", "/a/b/"])
+@pytest.mark.parametrize(
+    "raw", ["  ", " ", " /fnirs-tutorials", "/fnirs-tutorials ", "\t/a", "/a\n"]
+)
+def test_a_base_url_with_a_space_is_refused_as_myst_and_the_plugin_read_it(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    """Measured on a real build: MyST fails on ' /x' and on '  ', and the plugin keeps them."""
+    monkeypatch.setenv("BASE_URL", raw)
+    with pytest.raises(build_book.BookError) as stop:
+        build_book.read_base_url()
+    assert stop.value.exit_code == build_book.EXIT_BAD_BASE_URL
+    assert repr(raw) in str(stop.value)
+
+
+@pytest.mark.parametrize("raw", [None, "", "/", "/fnirs-tutorials", "/a/b/"])
 def test_a_base_url_that_is_empty_or_a_root_path_is_read(
     monkeypatch: pytest.MonkeyPatch, raw: str | None
 ) -> None:

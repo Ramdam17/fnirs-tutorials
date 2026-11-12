@@ -984,22 +984,29 @@ def find_frame_sources(mdast: Any) -> list[str]:
 def normalize_base_url(raw: str | None) -> str:
     """Return the base URL of the build without trailing slashes, or ``""`` when unset.
 
-    The caller passes the base URL in the environment variable ``BASE_URL``; MyST reads it
-    the same way, and the plugin of the book prefixes it to the source of a frame.
+    The one base URL of a build is the environment variable ``BASE_URL``. MyST, the plugin
+    ``plugins/iframe-base-url.mjs`` and this script all read that variable and nothing
+    else, and none of them strips spaces (measured on a real build: MyST fails on
+    ``" /x"`` and on ``"  "``, and the plugin prefixes them as they are), so neither does
+    this function. The plugin and this function remove trailing slashes alike; the
+    value is judged by :func:`read_base_url` before the build starts.
     """
-    return (raw or "").strip().rstrip("/")
+    return (raw or "").rstrip("/")
 
 
 # A base URL is a path on the host: it starts with one slash, and holds no space, query,
 # fragment or backslash. ``//host`` is refused because ``//host/interactive/x`` would
 # pass for a source of the book while naming another host.
-_BASE_URL_FORM = re.compile(r"^/(?!/)[^\s?#\\]*$")
+_BASE_URL_FORM = re.compile(r"/(?!/)[^\s?#\\]*")
 
 
 def read_base_url() -> str:
     """Read ``BASE_URL`` from the environment, refuse a malformed one, and normalise it.
 
-    The accepted form is an empty value or a root path such as ``/fnirs-tutorials``.
+    The value is judged exactly as MyST and the plugin receive it. The accepted form is an
+    unset or empty variable, or a root path such as ``/fnirs-tutorials`` with optional
+    trailing slashes. A value made of spaces, or with a space anywhere, is refused: it is
+    not empty for MyST and the plugin, and MyST then fails on it.
     Without its leading slash the value would make the check accept a relative frame
     source (``fnirs-tutorials/interactive/x`` starts with the prefix it builds), which
     depends on the address the page is read at.
@@ -1011,7 +1018,7 @@ def read_base_url() -> str:
     """
     raw = os.environ.get("BASE_URL")
     base_url = normalize_base_url(raw)
-    if base_url and not _BASE_URL_FORM.match(base_url):
+    if base_url and not _BASE_URL_FORM.fullmatch(base_url):
         raise BookError(
             EXIT_BAD_BASE_URL,
             f"BASE_URL is {raw!r}, which is not a root path. It must be empty or start "

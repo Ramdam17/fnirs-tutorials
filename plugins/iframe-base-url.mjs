@@ -25,6 +25,9 @@
 // built page and refuses a frame whose source is not <BASE_URL>/interactive/<file> with
 // the file published in the built site.
 //
+// Spaces. The plugin uses the value as given and removes only trailing slashes, as MyST
+// does; scripts/build_book.py refuses, before the build, a value that holds a space.
+//
 // Tests. The plugin has no unit test. It runs inside the build, so it is exercised by the
 // real builds only: the book build with no base URL, the book build with BASE_URL set, and
 // the build on the CI runner, where BASE_URL is set. check_frames is the test.
