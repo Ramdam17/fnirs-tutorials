@@ -35,9 +35,13 @@
   #plot { width: 100%; }
   #plot svg { display: block; width: 100%; height: auto; }
   svg text { font: 12px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; fill: var(--text); }
-  svg .tick-label { fill: var(--tick); }
+  svg .tick text { fill: var(--tick); }
   svg .axis-title { font-size: 12px; }
   svg .curve-label { font-weight: 600; }
+  svg .axis path, svg .axis line { stroke: var(--axis); }
+  svg .grid path { stroke: none; }
+  svg .grid line { stroke: var(--grid); stroke-width: 0.5; }
+  svg .curve { fill: none; stroke-width: 2.2; stroke-linejoin: round; stroke-linecap: round; }
   .readout { margin: 6px 0 0; color: var(--tick); font-variant-numeric: tabular-nums; }
 </style>
 </head>
@@ -53,6 +57,7 @@
 <div id="plot" role="img" aria-label="Three stacked plots over time in seconds: a boxcar, a double-gamma response, and their convolution."></div>
 <p id="readout" class="readout" aria-live="polite"></p>
 
+<script src="vendor/d3.min.js"></script>
 <script>
 "use strict";
 
@@ -75,8 +80,6 @@ const PANEL_HEIGHT = 104;
 const PANEL_GAP = 22;
 const MARGIN = { top: 8, right: 14, bottom: 46, left: 62 };
 const X_TICK_STEP_S = 10;
-
-const SVG_NS = "http://www.w3.org/2000/svg";
 
 /* ---- Mathematics -------------------------------------------------------- */
 
@@ -130,140 +133,112 @@ function convolve(b, h) {
   return y;
 }
 
-/* ---- Scales and axes ---------------------------------------------------- */
+/* ---- Data ---------------------------------------------------------------- */
 
-function linearScale(d0, d1, r0, r1) {
-  return (v) => r0 + ((v - d0) / (d1 - d0)) * (r1 - r0);
-}
+const response = makeResponse();
+const responseArea = d3.sum(response) * TIME_STEP_S;
+const responseOnPlot = Array.from({ length: Math.round(TIME_END_S / TIME_STEP_S) + 1 },
+  (_, i) => (i < response.length ? response[i] : 0));
+const X_TICKS = d3.range(0, TIME_END_S + 1, X_TICK_STEP_S);
 
-function el(name, attrs, text) {
-  const node = document.createElementNS(SVG_NS, name);
-  for (const key of Object.keys(attrs || {})) node.setAttribute(key, attrs[key]);
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-
-function niceTicks(max, count) {
-  const raw = max / count;
-  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
-  const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= raw);
-  const ticks = [];
-  for (let v = 0; v <= max + 1e-9; v += step) ticks.push(Number(v.toFixed(6)));
-  return ticks;
-}
-
+// Tick text: an integer as it is, otherwise one decimal.
 function formatTick(v) {
   return Number.isInteger(v) ? String(v) : v.toFixed(1);
 }
 
-function drawPanel(svg, geom, spec) {
-  const { left, width, top, height } = geom;
-  const xScale = linearScale(0, TIME_END_S, left, left + width);
-  const yScale = linearScale(spec.yMax, spec.yMin, top, top + height);
-  const g = el("g");
+/* ---- Drawing ------------------------------------------------------------- */
 
-  // Vertical grid and x ticks (labels only on the bottom panel).
-  for (let t = 0; t <= TIME_END_S; t += X_TICK_STEP_S) {
-    g.appendChild(el("line", { x1: xScale(t), x2: xScale(t), y1: top, y2: top + height, stroke: "var(--grid)", "stroke-width": 0.5 }));
-    g.appendChild(el("line", { x1: xScale(t), x2: xScale(t), y1: top + height, y2: top + height + 4, stroke: "var(--axis)" }));
-    if (spec.showTimeLabels) {
-      g.appendChild(el("text", { x: xScale(t), y: top + height + 17, "text-anchor": "middle", class: "tick-label" }, String(t)));
-    }
-  }
+const svg = d3.select("#plot").append("svg").attr("aria-hidden", "true");
+const xTitle = svg.append("text").attr("class", "axis-title").attr("text-anchor", "middle").text("Time (s)");
 
-  // Horizontal grid, y ticks and tick labels.
-  for (const v of spec.yTicks) {
-    g.appendChild(el("line", { x1: left, x2: left + width, y1: yScale(v), y2: yScale(v), stroke: "var(--grid)", "stroke-width": 0.5 }));
-    g.appendChild(el("line", { x1: left - 4, x2: left, y1: yScale(v), y2: yScale(v), stroke: "var(--axis)" }));
-    g.appendChild(el("text", { x: left - 7, y: yScale(v) + 4, "text-anchor": "end", class: "tick-label" }, formatTick(v)));
-  }
-
-  // Axis lines and the y axis title, rotated.
-  g.appendChild(el("line", { x1: left, x2: left, y1: top, y2: top + height, stroke: "var(--axis)" }));
-  g.appendChild(el("line", { x1: left, x2: left + width, y1: top + height, y2: top + height, stroke: "var(--axis)" }));
-  const cx = 14;
-  const cy = top + height / 2;
-  g.appendChild(el("text", { x: cx, y: cy, transform: `rotate(-90 ${cx} ${cy})`, "text-anchor": "middle", class: "axis-title" }, spec.yTitle));
-  svg.appendChild(g);
-  return { xScale, yScale };
-}
-
-/* ---- Drawing of the curves ---------------------------------------------- */
-
-function pathFor(values, xScale, yScale) {
-  let d = "";
-  for (let i = 0; i < values.length; i += 1) {
-    d += (i === 0 ? "M" : "L") + xScale(i * TIME_STEP_S).toFixed(2) + " " + yScale(values[i]).toFixed(2);
-  }
-  return d;
-}
-
-function drawCurve(svg, scales, values, colour, label, geom) {
-  svg.appendChild(el("path", { d: pathFor(values, scales.xScale, scales.yScale), fill: "none", stroke: colour, "stroke-width": 2.2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
-  // Direct label at the top right of the panel, where all three curves are flat at zero
-  // (the block ends before the right edge): the name in the text colour, then a short
-  // swatch of the curve colour.
-  const right = geom.left + geom.width - 8;
-  const y = geom.top + 14;
-  svg.appendChild(el("text", { x: right - 24, y, "text-anchor": "end", class: "curve-label" }, label));
-  svg.appendChild(el("line", { x1: right - 18, x2: right, y1: y - 4, y2: y - 4, stroke: colour, "stroke-width": 2.2, "stroke-linecap": "round" }));
-}
-
-const response = makeResponse();
-const responseArea = response.reduce((s, v) => s + v, 0) * TIME_STEP_S;
-const timeAxis = Array.from({ length: Math.round(TIME_END_S / TIME_STEP_S) + 1 }, (_, i) => i * TIME_STEP_S);
-const responseOnPlot = timeAxis.map((_, i) => (i < response.length ? response[i] : 0));
-
-function render(width, length) {
-  const plot = document.getElementById("plot");
-  const innerWidth = Math.max(120, width - MARGIN.left - MARGIN.right);
-  const height = MARGIN.top + 3 * PANEL_HEIGHT + 2 * PANEL_GAP + MARGIN.bottom;
-  const svg = el("svg", { viewBox: `0 0 ${width} ${height}`, width, height, "aria-hidden": "true" });
-
+function panelSpecs(length) {
   const boxcar = makeBoxcar(length);
   const conv = convolve(boxcar, response);
-  const convMax = Math.max(...conv);
-  const plateauAxisMax = Math.ceil(responseArea);   // the axis is fixed so that the slider visibly changes the curve
-
-  const panels = [
-    { values: boxcar, colour: "var(--boxcar)", label: "Boxcar", yMin: 0, yMax: 1.2, yTicks: [0, 0.5, 1], yTitle: "Stimulus (a.u.)" },
-    { values: responseOnPlot, colour: "var(--response)", label: "Haemodynamic response", yMin: -0.4, yMax: 1.2, yTicks: [-0.4, 0, 0.5, 1], yTitle: "Response (a.u.)" },
-    { values: conv, colour: "var(--convolution)", label: "Convolution", yMin: -1, yMax: plateauAxisMax, yTicks: niceTicks(plateauAxisMax, 3), yTitle: "Convolution (a.u. · s)" },
-  ];
+  const plateauAxisMax = Math.ceil(responseArea);   // fixed so that the slider visibly changes the curve
   // The convolution can dip below zero in its undershoot; keep the zero line visible.
-  panels[2].yMin = Math.min(-0.5, Math.floor(Math.min(...conv) * 2) / 2);
+  const convMin = Math.min(-0.5, Math.floor(d3.min(conv) * 2) / 2);
+  return {
+    conv,
+    panels: [
+      { key: "boxcar", values: boxcar, label: "Boxcar", domain: [0, 1.2], ticks: [0, 0.5, 1], title: "Stimulus (a.u.)" },
+      { key: "response", values: responseOnPlot, label: "Haemodynamic response", domain: [-0.4, 1.2], ticks: [-0.4, 0, 0.5, 1], title: "Response (a.u.)" },
+      { key: "convolution", values: conv, label: "Convolution", domain: [convMin, plateauAxisMax], ticks: d3.ticks(0, plateauAxisMax, 3), title: "Convolution (a.u. · s)" },
+    ],
+  };
+}
 
-  panels.forEach((spec, k) => {
-    const geom = { left: MARGIN.left, width: innerWidth, top: MARGIN.top + k * (PANEL_HEIGHT + PANEL_GAP), height: PANEL_HEIGHT };
-    spec.showTimeLabels = k === panels.length - 1;
-    const scales = drawPanel(svg, geom, spec);
-    drawCurve(svg, scales, spec.values, spec.colour, spec.label, geom);
-  });
+function render(width, length) {
+  const { conv, panels } = panelSpecs(length);
+  const height = MARGIN.top + 3 * PANEL_HEIGHT + 2 * PANEL_GAP + MARGIN.bottom;
+  const innerWidth = Math.max(120, width - MARGIN.left - MARGIN.right);
+  const x = d3.scaleLinear([0, TIME_END_S], [MARGIN.left, MARGIN.left + innerWidth]);
 
-  const xTitleY = MARGIN.top + 3 * PANEL_HEIGHT + 2 * PANEL_GAP + 38;
-  svg.appendChild(el("text", { x: MARGIN.left + innerWidth / 2, y: xTitleY, "text-anchor": "middle", class: "axis-title" }, "Time (s)"));
+  svg.attr("viewBox", `0 0 ${width} ${height}`).attr("width", width).attr("height", height);
+  xTitle.attr("x", MARGIN.left + innerWidth / 2).attr("y", height - MARGIN.bottom + 38);
 
-  plot.replaceChildren(svg);
-  document.getElementById("readout").textContent =
-    `Area of the response: ${responseArea.toFixed(2)} s. Maximum of the convolution in the window: ${convMax.toFixed(2)} a.u. · s.`;
+  svg.selectAll("g.panel")
+    .data(panels, (d) => d.key)
+    .join((enter) => enter.append("g").attr("class", "panel"))
+    .attr("transform", (_, k) => `translate(0,${MARGIN.top + k * (PANEL_HEIGHT + PANEL_GAP)})`)
+    .each(function (spec, k) {
+      const panel = d3.select(this);
+      const y = d3.scaleLinear(spec.domain, [PANEL_HEIGHT, 0]);
+      const colour = `var(--${spec.key})`;
+      const line = d3.line().x((_, i) => x(i * TIME_STEP_S)).y((v) => y(v));
+      // One group per kind of layer, found again on each redraw by all of its classes
+      // (a selector built from "axis y-axis" would match nothing and add a group each time).
+      const layer = (cls) => panel.selectAll(`g.${cls.split(" ").join(".")}`).data([0]).join("g").attr("class", cls);
+
+      layer("grid x-grid").attr("transform", `translate(0,${PANEL_HEIGHT})`)
+        .call(d3.axisBottom(x).tickValues(X_TICKS).tickSize(-PANEL_HEIGHT).tickFormat(""));
+      layer("grid y-grid").attr("transform", `translate(${MARGIN.left},0)`)
+        .call(d3.axisLeft(y).tickValues(spec.ticks).tickSize(-innerWidth).tickFormat(""));
+      layer("axis x-axis").attr("transform", `translate(0,${PANEL_HEIGHT})`)
+        .call(d3.axisBottom(x).tickValues(X_TICKS).tickSize(4).tickSizeOuter(0)
+          .tickFormat(k === panels.length - 1 ? formatTick : () => ""));
+      layer("axis y-axis").attr("transform", `translate(${MARGIN.left},0)`)
+        .call(d3.axisLeft(y).tickValues(spec.ticks).tickSize(4).tickSizeOuter(0).tickFormat(formatTick));
+
+      panel.selectAll("text.axis-title").data([spec.title]).join("text")
+        .attr("class", "axis-title").attr("text-anchor", "middle")
+        .attr("transform", `translate(14,${PANEL_HEIGHT / 2}) rotate(-90)`).text((d) => d);
+
+      panel.selectAll("path.curve").data([spec.values]).join("path")
+        .attr("class", "curve").style("stroke", colour).attr("d", line);
+
+      // Direct label at the top right of the panel, where all three curves are flat at
+      // zero (the block ends before the right edge): the name in the text colour, then a
+      // short swatch of the curve colour. Anchoring at the right edge keeps the label
+      // clear of the curves at any width.
+      const label = panel.selectAll("g.direct-label").data([spec]).join((enter) => {
+        const g = enter.append("g").attr("class", "direct-label");
+        g.append("text").attr("class", "curve-label").attr("text-anchor", "end").attr("x", -24);
+        g.append("line").attr("class", "curve").attr("x1", -18).attr("x2", 0).attr("y1", -4).attr("y2", -4);
+        return g;
+      }).attr("transform", `translate(${MARGIN.left + innerWidth - 8},14)`);
+      label.select("line").style("stroke", colour);
+      label.select("text").text((d) => d.label);
+    });
+
+  d3.select("#readout").text(
+    `Area of the response: ${responseArea.toFixed(2)} s. Maximum of the convolution in the window: ${d3.max(conv).toFixed(2)} a.u. · s.`);
 }
 
 /* ---- Slider and layout that follows the container ------------------------ */
 
-const slider = document.getElementById("block-length");
-const valueOut = document.getElementById("block-value");
-const plotBox = document.getElementById("plot");
+const slider = d3.select("#block-length");
+const plotBox = d3.select("#plot").node();
 
 function update() {
-  const length = Number(slider.value);
-  valueOut.textContent = `${length} s`;
-  slider.setAttribute("aria-valuetext", `${length} seconds`);
+  const length = Number(slider.property("value"));
+  d3.select("#block-value").text(`${length} s`);
+  slider.attr("aria-valuetext", `${length} seconds`);
   render(Math.max(280, Math.floor(plotBox.clientWidth)), length);
 }
 
 // The native range input handles the mouse, touch and the arrow, Home, End and
 // Page keys; the "input" event fires continuously while it moves.
-slider.addEventListener("input", update);
+slider.on("input", update);
 
 // Redraw when the frame or the window changes width.
 let lastWidth = 0;

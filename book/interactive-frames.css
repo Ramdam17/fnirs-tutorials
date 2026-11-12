@@ -11,8 +11,10 @@
  * layout, a control row above plots whose width follows the frame, so one height has to
  * hold the tallest of them; a page that needs less leaves blank space under its plots,
  * which costs less than a different frame height for each page. The first illustration
- * needs 558 px of height at a frame width of 693 px and 621 px at a width of 366 px (its
- * text wraps), measured in a browser, so 720 px leaves room for both. An illustration that
+ * needs 559 px of height at a frame width of 693 px and 622 px at a width of 366 px (its
+ * text wraps), measured in a browser as the bottom of its last line plus its bottom
+ * padding, at the lowest, a middle and the highest position of its slider, so 720 px
+ * leaves room for both. An illustration that
  * needs more gets its own rule, selected by its file, for example
  * `iframe[src$="/banana.html"]`, written next to this one.
  *
