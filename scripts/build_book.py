@@ -63,6 +63,7 @@ import re
 import shutil
 import subprocess
 import sys
+import unicodedata
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -362,6 +363,89 @@ def check_executed_copies(root: Path, executed_dir: Path, notebooks: list[str]) 
                 f"which the notebooks import. Run the notebook command again: "
                 f"{NOTEBOOK_COMMAND}",
             )
+
+
+def _name_key(name: str) -> str:
+    """Return a key under which two spellings of one name that a disk may merge are equal."""
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+def spell_as_on_disk(path: Path) -> Path:
+    """Return ``path`` with each existing part spelled as its parent folder lists it.
+
+    The default file system of a Mac (APFS) ignores case, so ``Path.resolve`` and
+    ``is_file`` accept ``Data/fresh`` for ``data/fresh`` and keep the spelling they were
+    given (measured on APFS, Python 3.12.12). Two such spellings then differ as strings
+    while naming one file, which makes every comparison of paths by string unsound, and a
+    case-sensitive host (the Linux runner, GitHub Pages) tells them apart. Listing the
+    parent folder gives the spelling the disk stores. A part that the listing holds
+    exactly is kept without a further test; a part that only differs from an entry by
+    case or by Unicode normalisation is replaced by that entry when ``os.path.samefile``
+    says they are one file. On a case-sensitive disk that test fails, so nothing changes.
+
+    The part that does not exist, and everything after it, is kept as given, and so is a
+    part whose folder cannot be listed.
+
+    Parameters
+    ----------
+    path : Path
+        Absolute path. Links are not followed here; see :func:`on_disk`.
+
+    Returns
+    -------
+    Path
+        The same path, spelled as the disk names it for as much of it as exists.
+    """
+    parts = path.parts
+    if not path.is_absolute() or len(parts) < 2:
+        return path
+    current = Path(parts[0])
+    for index, part in enumerate(parts[1:], start=1):
+        try:
+            names = os.listdir(current)
+        except OSError:
+            return current.joinpath(*parts[index:])
+        if part in names:
+            current = current / part
+            continue
+        key = _name_key(part)
+        spelled = None
+        for name in names:
+            if _name_key(name) != key:
+                continue
+            try:
+                if os.path.samefile(current / part, current / name):
+                    spelled = name
+                    break
+            except OSError:
+                continue
+        if spelled is None:
+            return current.joinpath(*parts[index:])
+        current = current / spelled
+    return current
+
+
+def on_disk(path: Path) -> Path:
+    """Return the identity of a path: links resolved, each part spelled as the disk spells it.
+
+    This is the one place that decides what a path is. Every path that enters the script
+    from outside goes through it once, at the boundary: the repository root, the staging
+    folder, each entry of the table of contents, each static entry, each file that a page
+    or ``myst.yml`` references, and each file that a listing finds. Past that boundary two
+    paths are the same file exactly when they are equal as strings, so the comparisons of
+    the script stay plain comparisons.
+
+    When to use
+    -----------
+    On every path that comes from the command line, ``myst.yml``, a page, or a folder
+    listing, before it is compared, tested for containment or turned into a destination.
+
+    Examples
+    --------
+    >>> on_disk(Path("DATA/Fresh"))  # doctest: +SKIP
+    PosixPath('/repo/data/fresh')
+    """
+    return spell_as_on_disk(path.resolve())
 
 
 def is_file_or_absent(path: Path) -> bool:
@@ -1096,17 +1180,12 @@ def _has_exact_names(base: Path, segments: list[str]) -> bool:
 
     On macOS the default file system ignores case, so ``is_file`` accepts
     ``Banana.html`` for ``banana.html``, which a case-sensitive host, such as GitHub
-    Pages, does not serve. Listing the folder gives the names as stored.
+    Pages, does not serve. The spelling the disk gives, :func:`spell_as_on_disk`, is the
+    spelling asked for exactly when the answer is yes. A link along the way is not
+    followed, as a frame source names a path of the published site.
     """
-    current = base
-    for segment in segments:
-        try:
-            if segment not in os.listdir(current):
-                return False
-        except OSError:
-            return False
-        current = current / segment
-    return True
+    asked = base.joinpath(*segments)
+    return spell_as_on_disk(asked) == asked
 
 
 def _frame_refusal(src: str, base_url: str, interactive_dir: Path | None) -> str | None:

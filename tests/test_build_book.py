@@ -2007,3 +2007,132 @@ def test_the_stale_run_step_comes_before_the_deploy_step_and_gates_it() -> None:
         < script.index("exit 0")
         < script.index("git ls-remote")
     )
+
+
+# --------------------------------------------------------------------------------------
+# One identity for a path: the spelling the disk gives it
+# --------------------------------------------------------------------------------------
+
+
+def _fold_to_disk(path: Path | str) -> Path | None:
+    """Return the real path that ``path`` names on a disk that ignores case, or None."""
+    wanted = Path(path)
+    current = Path(wanted.anchor)
+    for part in wanted.parts[1:]:
+        try:
+            names = os.listdir(current)
+        except OSError:
+            return None
+        if part in names:
+            current = current / part
+            continue
+        folded = [name for name in names if name.casefold() == part.casefold()]
+        if not folded:
+            return None
+        current = current / folded[0]
+    return current
+
+
+@pytest.fixture
+def case_blind_disk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the file system behave as APFS does by default: it ignores case.
+
+    The Mac of the lab has such a disk and the Linux runner has not, so a test that
+    depends on it has to mean the same on both. ``Path.resolve`` keeps the spelling it
+    was given on such a disk (measured on APFS), so it is left alone; the probes that
+    answer "does this exist" and "is this the same file" ignore case.
+    """
+    real_is_file = Path.is_file
+    real_is_dir = Path.is_dir
+    real_exists = Path.exists
+    real_samefile = os.path.samefile
+
+    def probe(real: Any) -> Any:
+        def wrapped(self: Path) -> bool:
+            folded = _fold_to_disk(self)
+            return folded is not None and real(folded)
+
+        return wrapped
+
+    def samefile(first: Any, second: Any) -> bool:
+        one, two = _fold_to_disk(first), _fold_to_disk(second)
+        return one is not None and two is not None and real_samefile(one, two)
+
+    monkeypatch.setattr(Path, "is_file", probe(real_is_file))
+    monkeypatch.setattr(Path, "is_dir", probe(real_is_dir))
+    monkeypatch.setattr(Path, "exists", probe(real_exists))
+    monkeypatch.setattr(os.path, "samefile", samefile)
+
+
+@pytest.fixture
+def case_sensitive_disk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make two spellings that differ in case two different files, as on Linux."""
+    real_samefile = os.path.samefile
+
+    def samefile(first: Any, second: Any) -> bool:
+        return str(first) == str(second) and real_samefile(first, second)
+
+    monkeypatch.setattr(os.path, "samefile", samefile)
+
+
+def test_a_path_spelled_as_the_disk_names_it_is_returned_as_it_is(
+    tmp_path: Path,
+) -> None:
+    write_files(tmp_path, ["book/page.md"])
+    path = tmp_path.resolve() / "book" / "page.md"
+    assert build_book.on_disk(path) == path
+
+
+@pytest.mark.usefixtures("case_blind_disk")
+def test_on_a_disk_that_ignores_case_each_part_takes_the_spelling_of_its_listing(
+    tmp_path: Path,
+) -> None:
+    write_files(tmp_path, ["book/Sub/page.md"])
+    asked = tmp_path.resolve() / "BOOK" / "sub" / "PAGE.md"
+    assert build_book.on_disk(asked) == tmp_path.resolve() / "book" / "Sub" / "page.md"
+
+
+@pytest.mark.usefixtures("case_blind_disk")
+def test_a_part_that_does_not_exist_is_kept_as_given(tmp_path: Path) -> None:
+    write_files(tmp_path, ["book/page.md"])
+    asked = tmp_path.resolve() / "BOOK" / "Absent" / "Deeper.md"
+    assert (
+        build_book.on_disk(asked)
+        == tmp_path.resolve() / "book" / "Absent" / "Deeper.md"
+    )
+
+
+@pytest.mark.usefixtures("case_sensitive_disk")
+def test_on_a_case_sensitive_disk_a_path_that_differs_in_case_is_not_changed(
+    tmp_path: Path,
+) -> None:
+    write_files(tmp_path, ["book/page.md"])
+    asked = tmp_path.resolve() / "BOOK" / "Page.md"
+    assert build_book.on_disk(asked) == asked
+
+
+@pytest.mark.usefixtures("case_sensitive_disk")
+def test_on_a_case_sensitive_disk_two_names_that_differ_in_case_stay_two_files(
+    tmp_path: Path,
+) -> None:
+    write_files(tmp_path, ["dir/a.txt"])
+    if (tmp_path / "dir" / "A.TXT").exists():
+        pytest.skip("this disk ignores case, so two such files cannot be written")
+    write_files(tmp_path, ["dir/A.TXT"])
+    for name in ("a.txt", "A.TXT"):
+        path = tmp_path.resolve() / "dir" / name
+        assert build_book.on_disk(path) == path
+
+
+def test_a_link_is_followed_and_its_target_is_the_answer(tmp_path: Path) -> None:
+    write_files(tmp_path, ["real/target.txt"])
+    link = tmp_path / "alias.txt"
+    link.symlink_to(tmp_path / "real" / "target.txt")
+    assert build_book.on_disk(link) == tmp_path.resolve() / "real" / "target.txt"
+
+
+@pytest.mark.usefixtures("case_blind_disk")
+def test_a_path_that_cannot_be_listed_is_kept_as_given(tmp_path: Path) -> None:
+    write_files(tmp_path, ["file.txt"])
+    asked = tmp_path.resolve() / "FILE.txt" / "below"
+    assert build_book.on_disk(asked) == tmp_path.resolve() / "file.txt" / "below"
