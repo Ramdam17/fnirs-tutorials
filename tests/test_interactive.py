@@ -795,6 +795,16 @@ def _content(text: str, tag: re.Match[str]) -> tuple[int, int]:
     return tag.end(), tag.end() + closing.start()
 
 
+# The labelable elements of the HTML Standard, form section ("Categories", labelable
+# elements, and "The label element", labeled control): only these can be the labeled
+# control of a label, through ``for`` or by being
+# inside it. An <input type=hidden> is the one exception among the inputs, and it is not
+# read here. A <div role="slider"> that a label points at or wraps is not named by it.
+_LABELABLE = frozenset(
+    {"button", "input", "meter", "output", "progress", "select", "textarea"}
+)
+
+
 def _static_text_problem(content: str) -> str | None:
     """Say why a content cannot be a static name, or return None."""
     if "<" in content:
@@ -843,7 +853,9 @@ def control_name_problems(text: str) -> list[str]:
     The controls are every ``<input>`` (except a hidden one), ``<select>``,
     ``<textarea>`` and ``<button>``, and every element whose ``role`` is a widget role of
     WAI-ARIA 1.2 (``_WIDGET_ROLES``). A control needs a name from one of: a non-empty
-    ``aria-label`` or ``title``; a ``<label for="id">``; a ``<label>`` that wraps it;
+    ``aria-label`` or ``title``; a ``<label for="id">`` or a ``<label>`` that wraps it,
+    when the control is a labelable element (``_LABELABLE``) and not a ``div`` or an
+    SVG group that has a widget role;
     the elements that ``aria-labelledby`` lists; for a button, a widget role that takes
     its name from content and a button-type input, its own content or ``value``. Each
     element or label text that gives the name must be text without a tag and not an
@@ -888,7 +900,10 @@ def control_name_problems(text: str) -> list[str]:
         if name == "input" and kind in _VALUE_BUTTONS:
             named = named or bool((_attribute(attributes, "value") or "").strip())
         identifier = _attribute(attributes, "id")
-        sources = list(labels_for.get(identifier, [])) if identifier else []
+        labelable = name in _LABELABLE
+        sources = (
+            list(labels_for.get(identifier, [])) if identifier and labelable else []
+        )
         for reference in (_attribute(attributes, "aria-labelledby") or "").split():
             if reference in by_id:
                 sources.append(by_id[reference])
@@ -900,7 +915,9 @@ def control_name_problems(text: str) -> list[str]:
                 found.append(f"is named by {source.group(0)}: {reason}")
             else:
                 named = True
-        wraps, reason = _wrapping_label_problem(text, tag, labels)
+        wraps, reason = (
+            _wrapping_label_problem(text, tag, labels) if labelable else (False, None)
+        )
         if wraps:
             if reason:
                 found.append(f"is named by the label that wraps it: {reason}")
@@ -949,6 +966,14 @@ NAME_REFUSED = {
     "no name on a textarea": ('<textarea id="t"></textarea>', "has no name"),
     "no name on a button": ("<button></button>", "holds no text"),
     "no name on a widget role": ('<g role="slider"></g>', "has no name"),
+    "label for a div with a widget role": (
+        '<label for="s">Length</label><div id="s" role="slider" tabindex="0"></div>',
+        "has no name",
+    ),
+    "label wrapping a div with a widget role": (
+        '<label>Length <div role="slider" tabindex="0"></div></label>',
+        "has no name",
+    ),
     "empty aria-label": ('<input aria-label=" " type="range">', "has no name"),
     "a focusable separator": (
         '<div role="separator" tabindex="0"></div>',
