@@ -1769,6 +1769,18 @@ def test_the_removal_of_a_static_copy_cannot_leave_the_staging_folder(
 LONG_NAME = "a" * 300
 
 
+def test_the_newest_helper_file_is_found_under_a_folder_named_pycache(
+    tmp_path: Path,
+) -> None:
+    """Only the parts below ``src/`` count: the checkout may sit under any folder."""
+    root = tmp_path / "__pycache__" / "repo"
+    (root / "src" / "pkg").mkdir(parents=True)
+    (root / "src" / "pkg" / "a.py").write_text("x", encoding="utf-8")
+    (root / "src" / "pkg" / "__pycache__").mkdir()
+    (root / "src" / "pkg" / "__pycache__" / "a.pyc").write_text("x", encoding="utf-8")
+    assert build_book._newest_helper_file(root) == root / "src" / "pkg" / "a.py"
+
+
 def test_a_name_the_file_system_refuses_is_not_a_file(tmp_path: Path) -> None:
     assert build_book.is_file_or_absent(tmp_path / LONG_NAME) is False
     assert build_book.is_file_or_absent(tmp_path / "missing.md") is False

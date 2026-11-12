@@ -443,12 +443,17 @@ def test_the_vendored_d3_header_names_the_recorded_version() -> None:
     assert f"v{D3_VERSION}" in header
 
 
-def vendor_files() -> list[str]:
-    """Paths under ``vendor/`` relative to it, as published; hidden files are left out."""
+def vendor_files(vendor_dir: Path = VENDOR_DIR) -> list[str]:
+    """Paths under ``vendor_dir`` relative to it, as published; hidden files are left out.
+
+    Only the parts below ``vendor_dir`` are tested for a leading dot: the folders above it
+    belong to wherever the repository is checked out, for example a hidden worktree folder.
+    """
     return sorted(
-        p.relative_to(VENDOR_DIR).as_posix()
-        for p in VENDOR_DIR.rglob("*")
-        if p.is_file() and not any(part.startswith(".") for part in p.parts)
+        p.relative_to(vendor_dir).as_posix()
+        for p in vendor_dir.rglob("*")
+        if p.is_file()
+        and not any(part.startswith(".") for part in p.relative_to(vendor_dir).parts)
     )
 
 
@@ -459,6 +464,18 @@ def unpinned(files: list[str]) -> list[str]:
 
 def test_a_file_under_vendor_is_in_the_allow_list_or_a_licence() -> None:
     assert unpinned(vendor_files()) == []
+
+
+def test_the_vendor_listing_does_not_depend_on_the_folders_above_it(
+    tmp_path: Path,
+) -> None:
+    """A checkout under a hidden folder must still list its vendored files."""
+    vendor = tmp_path / ".worktrees" / "agent" / "interactive" / "vendor"
+    (vendor / "sub").mkdir(parents=True)
+    for name in ("d3.min.js", "lodash.min.js", "LICENSE", ".DS_Store", "sub/x.js"):
+        (vendor / name).write_text("x", encoding="utf-8")
+    assert vendor_files(vendor) == ["LICENSE", "d3.min.js", "lodash.min.js", "sub/x.js"]
+    assert unpinned(vendor_files(vendor)) == ["lodash.min.js", "sub/x.js"]
 
 
 def test_a_second_library_without_a_pin_is_found() -> None:

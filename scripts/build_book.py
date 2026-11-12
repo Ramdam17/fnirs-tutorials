@@ -251,7 +251,7 @@ def _newest_helper_file(root: Path) -> Path | None:
     files = [
         path
         for path in helper_dir.rglob("*")
-        if path.is_file() and "__pycache__" not in path.parts
+        if path.is_file() and "__pycache__" not in path.relative_to(helper_dir).parts
     ]
     return max(files, key=lambda path: path.stat().st_mtime, default=None)
 
