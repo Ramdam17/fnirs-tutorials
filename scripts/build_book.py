@@ -601,6 +601,62 @@ def static_entry_paths(
     return paths
 
 
+def check_static_entries(
+    root: Path,
+    executed_dir: Path,
+    entries: list[Path],
+    toc_files: list[str],
+    myst_path: Path,
+) -> None:
+    """Refuse a static entry that overlaps what the staging folder holds for another reason.
+
+    The staging folder holds the executed notebooks, the staged pages and the site, which
+    this script writes or removes for their own sake. A static entry is copied from the
+    repository and its staged copy is removed before each build, so it must hold none of
+    them: an entry that contains a page or a notebook of the table of contents would have
+    the executed copy of that notebook removed and the source copied over it, and an entry
+    that is the staging folder or one of its parents would remove the staging folder.
+
+    Parameters
+    ----------
+    root, executed_dir : Path
+        Repository root and staging folder, both resolved.
+    entries : list of Path
+        Resolved entries, as returned by :func:`static_entry_paths`.
+    toc_files : list of str
+        ``file:`` entries of the table of contents, relative to ``root``.
+    myst_path : Path
+        ``myst.yml``, for the message.
+
+    Raises
+    ------
+    BookError
+        With ``EXIT_FILE_ERROR``, naming the entry and the page or folder it overlaps, before
+        anything is removed or copied.
+    """
+    stage = executed_dir.resolve()
+    for entry in entries:
+        name = entry.relative_to(root.resolve()).as_posix()
+        if entry == stage or entry in stage.parents or stage in entry.parents:
+            raise BookError(
+                EXIT_FILE_ERROR,
+                f"static_files entry {name!r} of {myst_path} is the staging folder "
+                f"{executed_dir} or one of its parents or children; the staged copy of an "
+                "entry is removed before each build, so it would remove the staging "
+                "folder.",
+            )
+        for page in toc_files:
+            target = (root / page).resolve()
+            if target == entry or entry in target.parents:
+                raise BookError(
+                    EXIT_FILE_ERROR,
+                    f"static_files entry {name!r} of {myst_path} holds the page {page!r} "
+                    "of the table of contents. A static entry is copied as it is and its "
+                    "staged copy is removed before each build, which would remove the "
+                    "executed copy of a notebook; name a folder that holds no page.",
+                )
+
+
 def remove_stale_static(
     root: Path, executed_dir: Path, entries: list[Path]
 ) -> list[Path]:
@@ -608,8 +664,17 @@ def remove_stale_static(
 
     The copy of a static folder is a fresh copy of the folder at every build; without
     this a file deleted from ``interactive/`` would stay in the staging folder and be
-    published again by every local build. Nothing outside the staging folder is touched:
-    a link at the place of the copy is unlinked, never followed.
+    published again by every local build.
+
+    What it may remove, and what guarantees it. Only the counterpart, inside the staging
+    folder, of an entry of ``project.static_files``. Three checks stand before it, and it
+    is called only after them: ``check_executed_dir`` (the staging folder is neither the
+    repository root nor one of its parents), :func:`static_entry_paths` (an entry lies in
+    the repository and not under ``data/`` or ``_build/``) and
+    :func:`check_static_entries` (an entry holds no page of the table of contents and is
+    not the staging folder or one of its parents or children, so its counterpart holds no
+    executed notebook). It re-checks that the parent of each copy resolves inside the
+    staging folder, and a link at the place of the copy is unlinked, never followed.
 
     Parameters
     ----------
@@ -782,13 +847,11 @@ def stage_book(root: Path, executed_dir: Path) -> StagedBook:
     staged = StagedBook(
         stage_dir=executed_dir, toc_files=toc_files, notebooks=notebooks
     )
+    static_entries = static_entry_paths(load_myst_document(myst_path), myst_path, root)
+    check_static_entries(root, executed_dir, static_entries, toc_files, myst_path)
     for removed in remove_stale_site(executed_dir):
         logger.info("Removed %s from an earlier build", removed)
-    for removed in remove_stale_static(
-        root,
-        executed_dir,
-        static_entry_paths(load_myst_document(myst_path), myst_path, root),
-    ):
+    for removed in remove_stale_static(root, executed_dir, static_entries):
         logger.info("Removed %s from an earlier build", removed)
     sources = [myst_path]
     for name in toc_files:

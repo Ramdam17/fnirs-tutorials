@@ -1501,6 +1501,43 @@ def test_a_staged_path_that_cannot_be_placed_under_the_root_is_a_book_error(
     assert "elsewhere.txt" in str(stop.value)
 
 
+@pytest.mark.parametrize(
+    "entry", ["book", "book/no_code.md", "book/notebook_smoke.ipynb"]
+)
+def test_a_static_entry_that_holds_a_page_of_the_book_is_refused_before_any_removal(
+    tmp_path: Path, entry: str
+) -> None:
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"])
+    add_to_myst(root, {"static_files": [entry]}, {})
+    executed = root / "_build" / "executed"
+    notebook_copies = sorted(executed.rglob("*.ipynb"))
+    assert notebook_copies
+    with pytest.raises(build_book.BookError) as stop:
+        build_book.stage_book(root, executed)
+    assert stop.value.exit_code == build_book.EXIT_FILE_ERROR
+    message = str(stop.value)
+    assert repr(entry) in message
+    assert "book/" in message and ("no_code.md" in message or ".ipynb" in message)
+    assert sorted(executed.rglob("*.ipynb")) == notebook_copies
+    assert not (executed / "myst.yml").exists()
+
+
+def test_a_static_entry_that_is_the_staging_folder_or_a_parent_of_it_is_refused(
+    tmp_path: Path,
+) -> None:
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"])
+    executed = root / "out" / "stage"
+    shutil.copytree(root / "_build" / "executed", executed)
+    for entry in ("out", "out/stage"):
+        add_to_myst(root, {"static_files": [entry]}, {})
+        with pytest.raises(build_book.BookError) as stop:
+            build_book.stage_book(root, executed)
+        assert stop.value.exit_code == build_book.EXIT_FILE_ERROR
+        assert repr(entry) in str(stop.value)
+        assert "staging folder" in str(stop.value)
+        assert sorted(executed.rglob("*.ipynb"))
+
+
 def test_the_target_of_a_frame_is_staged_only_through_the_static_folder(
     tmp_path: Path,
 ) -> None:
