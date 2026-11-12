@@ -1172,32 +1172,58 @@ _ATTRIBUTE = re.compile(
 )
 
 
-def read_html_frames(text: str) -> tuple[list[str], list[str]]:
-    """Return the ``src`` of every ``<iframe>`` of a deployed page, and the unreadable ones.
+_WHY_SRCDOC = "this iframe has a srcdoc, a page written inside the tag, which this check does not read"
+_WHY_QUOTING = (
+    "the HTML page that is deployed writes its src in a form that is not double-quoted, "
+    "which this check does not read"
+)
 
-    The theme writes ``src="..."`` with double quotes (measured in the HTML of the
-    book: ``<iframe width="100%" height="100%" src="/..." title="..." ...>``), and a
-    source is read only in that form, with HTML entities decoded. An ``<iframe>`` that
-    has a ``src`` in any other form (single quotes, no quotes) is returned in the second
-    list as its raw tag, so that the caller refuses it: a change of quoting must make the
-    check refuse and never accept. An ``<iframe>`` with no ``src`` loads nothing and is
-    left out.
+
+def read_html_frames(text: str) -> tuple[list[str], list[tuple[str, str]]]:
+    """Return the ``src`` of every ``<iframe>`` of a deployed page, and what cannot be read.
+
+    What counts as a frame: any ``<iframe`` tag of the HTML, whatever the case, written
+    anywhere in the page. The theme writes ``src="..."`` with double quotes (measured in
+    the HTML of the book: ``<iframe width="100%" height="100%" src="/..." title="..." ...>``),
+    and a source is read only in that form, with HTML entities decoded.
+
+    Everything that looks like a frame and cannot be read is returned in the second list,
+    as ``(what was found, why it is refused)``, so that the caller refuses it: a change of
+    the markup must make the check refuse and never accept. That is a ``src`` in another
+    form (single quotes, no quotes), an ``<iframe>`` that has a ``srcdoc`` (its content is
+    a page of its own, which no rule of this check looks at), and a page in which the text
+    ``<iframe`` occurs more often than the tags this reader parsed (a tag with an
+    unbalanced quote, or cut off, which the pattern cannot read). An ``<iframe>`` with no
+    ``src`` and no ``srcdoc`` loads nothing and is left out.
 
     Returns
     -------
-    tuple of (list of str, list of str)
-        The sources read, and the tags whose ``src`` could not be read.
+    tuple of (list of str, list of (str, str))
+        The sources read, and the unreadable frames with their reasons.
     """
     sources: list[str] = []
-    unreadable: list[str] = []
+    unreadable: list[tuple[str, str]] = []
+    parsed = 0
     for match in _IFRAME_TAG.finditer(text):
+        parsed += 1
         for name, value in _ATTRIBUTE.findall(match.group(1)):
-            if name.lower() != "src":
-                continue
-            if value.startswith('"') and value.endswith('"') and len(value) >= 2:
-                sources.append(html.unescape(value[1:-1]))
-            else:
-                unreadable.append(match.group(0))
+            lowered = name.lower()
+            if lowered == "srcdoc":
+                unreadable.append((match.group(0), _WHY_SRCDOC))
+            elif lowered == "src":
+                if value.startswith('"') and value.endswith('"') and len(value) >= 2:
+                    sources.append(html.unescape(value[1:-1]))
+                else:
+                    unreadable.append((match.group(0), _WHY_QUOTING))
+    occurrences = len(re.findall(r"<iframe", text, re.IGNORECASE))
+    if occurrences > parsed:
+        found = f"{occurrences} occurrences of '<iframe'"
+        why = (
+            f"the text '<iframe' occurs {occurrences} times in the HTML page that is "
+            f"deployed but only {parsed} tags were parsed, so a tag this reader cannot "
+            "parse (an unbalanced quote, a tag cut off) would be passed over"
+        )
+        unreadable.append((found, why))
     return sources, unreadable
 
 
@@ -1225,8 +1251,10 @@ def check_frames(
     page file holds a frame: each frame of the page file must be in the HTML with the same
     ``src``, and each ``<iframe>`` of the HTML must be a frame of the page file and pass
     the same rule. A frame that only the HTML holds (a raw ``<iframe>`` written in a
-    markdown page, if MyST lets one through) is refused, and so is a ``src`` that is not
-    written in double quotes (see :func:`read_html_frames`). A page whose HTML is missing
+    markdown page, if MyST lets one through) is refused, and so is anything that looks like
+    a frame and cannot be read: a ``src`` that is not written in double quotes, a
+    ``srcdoc``, and a page in which ``<iframe`` occurs more often than tags were parsed
+    (see :func:`read_html_frames`). A page whose HTML is missing
     is refused only when the page file holds a frame; for a page without one, nothing
     in this script reports a missing HTML file, because MyST's ``--strict`` build does and
     the table-of-contents check covers the page file. The source page of the book is not
@@ -1299,12 +1327,8 @@ def check_frames(
             or "the HTML page that is deployed holds it but the page file does not "
             "record it",
         )
-    for tag in unreadable:
-        refuse(
-            tag,
-            "the HTML page that is deployed writes its src in a form that is not "
-            "double-quoted, which this check does not read",
-        )
+    for found, why in unreadable:
+        refuse(found, why)
     return problems
 
 

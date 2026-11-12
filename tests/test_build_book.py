@@ -1624,6 +1624,56 @@ def test_a_double_quoted_src_is_read_whatever_the_case_of_the_tag(
     assert build_book.check_frames(page["location"], page, "", html_dir) == []
 
 
+@pytest.mark.parametrize(
+    "tag",
+    [
+        "<iframe srcdoc=\"<script src='https://cdn.example.org/x.js'></script>\"></iframe>",
+        "<iframe srcdoc='<p>x</p>'></iframe>",
+        "<iframe SRCDOC=x></iframe>",
+        '<iframe src="/interactive/hrf.html" srcdoc="<p>x</p>"></iframe>',
+    ],
+)
+def test_an_iframe_with_srcdoc_is_refused(tmp_path: Path, tag: str) -> None:
+    html_dir = tmp_path / "_build" / "html"
+    (html_dir / "interactive").mkdir(parents=True)
+    (html_dir / "interactive" / ILLUSTRATION).write_text("x", encoding="utf-8")
+    page = page_without_frame()
+    write_html(html_dir, page["slug"], tag)
+    problems = build_book.check_frames(page["location"], page, "", html_dir)
+    assert problems
+    assert all(p.exit_code == build_book.EXIT_FRAME for p in problems)
+    assert any("srcdoc" in str(p) for p in problems)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '<iframe src="https://example.org/x" title=don\'t></iframe>',
+        '<iframe title="a src="https://example.org/x"></iframe>',
+        '<p>text</p><IFRAME src="https://example.org/x',
+        '<iframe src="/a"></iframe><iframe src="/b>',
+    ],
+)
+def test_a_page_with_more_iframe_tags_than_the_reader_parsed_is_refused(
+    tmp_path: Path, body: str
+) -> None:
+    html_dir = tmp_path / "_build" / "html"
+    html_dir.mkdir(parents=True)
+    page = page_without_frame()
+    write_html(html_dir, page["slug"], body)
+    problems = build_book.check_frames(page["location"], page, "", html_dir)
+    assert len(problems) >= 1
+    assert all(p.exit_code == build_book.EXIT_FRAME for p in problems)
+    assert any("occurs" in str(p) and "parsed" in str(p) for p in problems)
+
+
+def test_a_sound_frame_is_counted_once_and_accepted(tmp_path: Path) -> None:
+    html_dir = tmp_path / "_build" / "html"
+    publish(html_dir, "frame-relative", f"/interactive/{ILLUSTRATION}", (ILLUSTRATION,))
+    page = frame_page("frame_relative", f"/interactive/{ILLUSTRATION}")
+    assert build_book.check_frames(page["location"], page, "", html_dir) == []
+
+
 def test_a_page_without_frame_and_without_html_is_not_a_frame_error(
     tmp_path: Path,
 ) -> None:
