@@ -1030,7 +1030,9 @@ def check_stage_operations(
 
     Two invariants, checked on each operation whatever input produced it. Containment: no
     folder between the staging folder and the path is a link, so the operation happens
-    inside the staging folder as the disk sees it; a path to write is not a link either.
+    inside the staging folder as the disk sees it, and each is a real folder or absent; a
+    path to write is not a link either and is a regular file or absent, so that the copy
+    writes at that path and not inside a folder found there.
     A link that an earlier removal of the plan removes does not count, since it is gone
     when the operation runs. A path to remove that is itself a link is allowed: it is
     unlinked and never followed. Ownership: no removal is a path of ``owned`` or one of
@@ -1068,11 +1070,37 @@ def check_stage_operations(
                     f"the staging folder {executed_dir}, and leave it; nothing was "
                     "changed. Remove the link.",
                 )
+            if (
+                os.path.lexists(current)
+                and not current.is_symlink()
+                and not current.is_dir()
+                and not gone(current)
+            ):
+                raise BookError(
+                    EXIT_BAD_EXECUTED_DIR,
+                    f"the {op.kind} of {op.path} needs {current} to be a folder, and "
+                    f"it is a file of the staging folder {executed_dir}; nothing was "
+                    "changed. Remove the file.",
+                )
         if op.kind == COPY and op.path.is_symlink() and not gone(op.path):
             raise BookError(
                 EXIT_BAD_EXECUTED_DIR,
                 f"{op.path} in the staging folder {executed_dir} is a link, and the "
                 "copy would write through it; nothing was changed. Remove the link.",
+            )
+        if (
+            op.kind == COPY
+            and os.path.lexists(op.path)
+            and not op.path.is_symlink()
+            and not op.path.is_file()
+            and not gone(op.path)
+        ):
+            what = "a folder" if op.path.is_dir() else "neither a file nor a folder"
+            raise BookError(
+                EXIT_BAD_EXECUTED_DIR,
+                f"{op.path} in the staging folder {executed_dir} is {what}, and the "
+                "copy would write inside it instead of at that path; nothing was "
+                "changed. Remove it.",
             )
         for held in owned:
             hits = (

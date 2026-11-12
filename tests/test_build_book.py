@@ -695,18 +695,18 @@ def test_a_myst_yml_that_is_not_yaml_exits_with_the_table_of_contents_code(
     assert "is not valid YAML" in caplog.text
 
 
-def test_a_file_that_cannot_be_copied_exits_with_a_named_code(
+def test_a_file_where_a_staging_folder_is_needed_is_refused_before_any_copy(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A file where a staging folder is needed makes the copy fail with an OSError."""
+    """The plan sees the file in the way, so no copy starts and none fails half way."""
     root = make_project(tmp_path, ["no_code"])
     executed = root / "_build" / "executed"
     executed.mkdir(parents=True)
     (executed / "book").write_text("in the way", encoding="utf-8")
     build = FakeBuild(["no_code"])
-    assert run_main(root, build) == build_book.EXIT_FILE_ERROR
-    assert "cannot stage" in caplog.text
-    assert "to " + str(executed / "book" / "no_code.md") in caplog.text
+    assert run_main(root, build) == build_book.EXIT_BAD_EXECUTED_DIR
+    assert f"needs {executed / 'book'} to be a folder" in caplog.text
+    assert (executed / "book").read_text(encoding="utf-8") == "in the way"
     assert build.calls == []
 
 
@@ -2392,6 +2392,69 @@ def test_a_destination_that_is_a_link_is_not_written_through(tmp_path: Path) -> 
     assert snapshot(outside) == beyond
 
 
+@pytest.mark.parametrize(
+    ("kind", "present", "fragment"),
+    [
+        ("copy", "dir:book/page.md", "a folder"),
+        ("copy", "file:book", "a file"),
+        ("copy", "file:book/sub", "a file"),
+        ("copy", "file:book/page.md", None),
+        ("copy", "dir:book", None),
+        ("copy", "none", None),
+        ("remove", "file:book", "a file"),
+    ],
+)
+def test_a_write_needs_a_regular_file_or_nothing_at_its_path_and_folders_on_the_way(
+    tmp_path: Path, kind: str, present: str, fragment: str | None
+) -> None:
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    if present != "none":
+        what, name = present.split(":")
+        target = stage / name
+        if what == "dir":
+            target.mkdir(parents=True)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("x", encoding="utf-8")
+    source = tmp_path / "source.txt"
+    source.write_text("x", encoding="utf-8")
+    path = (
+        stage / "book" / "sub" / "page.md"
+        if present == "file:book/sub"
+        else (stage / "book" / "page.md")
+    )
+    operation = build_book.StageOperation(
+        kind, path, source if kind == "copy" else None
+    )
+    if fragment is None:
+        build_book.check_stage_operations(stage, [operation], [])
+        return
+    with pytest.raises(build_book.BookError) as stop:
+        build_book.check_stage_operations(stage, [operation], [])
+    assert stop.value.exit_code == build_book.EXIT_BAD_EXECUTED_DIR
+    assert fragment in str(stop.value) and str(
+        path.parent if present.startswith("file") else path
+    ) in str(stop.value)
+
+
+def test_a_folder_or_file_taken_away_by_an_earlier_removal_counts_as_absent(
+    tmp_path: Path,
+) -> None:
+    stage = tmp_path / "stage"
+    (stage / "book" / "page.md").mkdir(parents=True)
+    (stage / "plain").write_text("x", encoding="utf-8")
+    source = tmp_path / "source.txt"
+    source.write_text("x", encoding="utf-8")
+    operations = [
+        build_book.StageOperation(build_book.REMOVE, stage / "book", None),
+        build_book.StageOperation(build_book.REMOVE, stage / "plain", None),
+        build_book.StageOperation(build_book.COPY, stage / "book" / "page.md", source),
+        build_book.StageOperation(build_book.COPY, stage / "plain" / "x.md", source),
+    ]
+    build_book.check_stage_operations(stage, operations, [])
+
+
 def link_the_notebook_of_the_book(root: Path) -> None:
     """Make the notebook of the table of contents a link to a notebook elsewhere."""
     elsewhere = root / "notebooks"
@@ -2755,8 +2818,31 @@ def scenario_linked_destination(
     return executed, [outside], build_book.EXIT_BAD_EXECUTED_DIR, "is a link"
 
 
+def scenario_folder_at_a_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Scenario:
+    root = project_with_stale_stage(tmp_path)
+    executed = root / "_build" / "executed"
+    (executed / "myst.yml").mkdir()
+    (executed / "myst.yml" / "inner.txt").write_text("keep", encoding="utf-8")
+    return executed, [], build_book.EXIT_BAD_EXECUTED_DIR, "a folder"
+
+
+def scenario_file_on_the_way(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Scenario:
+    root = project_with_stale_stage(tmp_path, ["interactive"])
+    write_files(root, ["plugins/p.mjs"])
+    add_to_myst(root, {"plugins": ["plugins/p.mjs"]}, {})
+    executed = root / "_build" / "executed"
+    (executed / "plugins").write_text("a file where a folder is due", encoding="utf-8")
+    return executed, [], build_book.EXIT_BAD_EXECUTED_DIR, "a file"
+
+
 FILE = build_book.EXIT_FILE_ERROR
 REFUSING_SCENARIOS = {
+    "folder at a write": scenario_folder_at_a_write,
+    "file on the way of a write": scenario_file_on_the_way,
     "entry absent": scenario_static("absent", FILE, "names no file"),
     "entry outside": scenario_static("../outside", FILE, "points outside"),
     "entry data": scenario_static("data", FILE, "never staged"),
