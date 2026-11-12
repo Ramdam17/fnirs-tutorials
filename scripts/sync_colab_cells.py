@@ -19,7 +19,11 @@ the repository, the ref, the lines of ``[tool.uv] override-dependencies`` of
 literal with ``json.dumps``, never pasted into code. The rest of the template is copied
 as it is. The cell it writes carries the tags ``colab-setup`` and ``hide-input``; the
 first one is how this script finds the cell again, so a rerun replaces it and never adds
-a second.
+a second. The second one folds the cell in the book. On Colab the cell is folded by two
+things together, measured there on a notebook opened from GitHub: the metadata key
+``cellView`` with the value ``form``, which this script writes, and a title line of the
+template, a comment that starts with ``@title``. Either one alone leaves the cell shown
+in full, and so does the tag ``hide-input``.
 
 The ref of a notebook is the one the notebook already carries (read from its setup cell,
 then from its link), or the default ref of the configuration for a notebook that carries
@@ -88,6 +92,11 @@ MYST_SUBPATH = Path("myst.yml")
 SETUP_TAG = "colab-setup"
 HIDE_TAG = "hide-input"
 SETUP_TAGS = [SETUP_TAG, HIDE_TAG]
+# Colab's own metadata key for a cell shown as a form, that is with its code folded.
+CELL_VIEW_KEY = "cellView"
+CELL_VIEW_FORM = "form"
+# Start of the comment line Colab reads as the title of a cell. The fold needs it too.
+TITLE_PREFIX = "# @title "
 SETUP_CELL_ID = "colab-setup"
 LINK_TEXT = "Open this notebook in Google Colab"
 COLAB_GITHUB_URL = "https://colab.research.google.com/github"
@@ -491,7 +500,7 @@ def sync_notebook(
         "cell_type": "code",
         "execution_count": None,
         "id": cell_id,
-        "metadata": {"tags": list(SETUP_TAGS)},
+        "metadata": {CELL_VIEW_KEY: CELL_VIEW_FORM, "tags": list(SETUP_TAGS)},
         "outputs": [],
         "source": _to_lines(render_cell(template, config, ref, overrides)),
     }
@@ -604,6 +613,11 @@ def check_notebook(
             )
         if _tags(cell) != SETUP_TAGS:
             problems.append(f"the setup cell must carry exactly the tags {SETUP_TAGS}")
+        if (cell.get("metadata") or {}).get(CELL_VIEW_KEY) != CELL_VIEW_FORM:
+            problems.append(
+                f"the setup cell must carry the metadata key {CELL_VIEW_KEY!r} with "
+                f"the value {CELL_VIEW_FORM!r}, which folds it on Colab"
+            )
         if cell.get("outputs") or cell.get("execution_count") is not None:
             problems.append("the setup cell holds an output or an execution count")
 

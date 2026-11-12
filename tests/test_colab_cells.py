@@ -71,6 +71,14 @@ def test_template_ships_the_values_it_would_be_rendered_with() -> None:
     assert _render(CONFIG.default_ref) == TEMPLATE.rstrip("\n")
 
 
+def test_the_cell_starts_with_the_title_line_colab_folds_it_under() -> None:
+    # Measured on Colab: a cell is folded when it has a title line and the metadata key
+    # "cellView" with the value "form", and shown in full when it has only one of them.
+    first_line = _render("main").splitlines()[0]
+    assert first_line.startswith(sync.TITLE_PREFIX)
+    assert first_line.removeprefix(sync.TITLE_PREFIX).strip()
+
+
 @pytest.mark.parametrize("notebook", BOOK_NOTEBOOKS)
 def test_book_notebook_has_link_cell_and_runtime_request(notebook: str) -> None:
     nb = json.loads((REPO_ROOT / notebook).read_text(encoding="utf-8"))
@@ -100,7 +108,10 @@ def test_book_notebook_has_link_cell_and_runtime_request(notebook: str) -> None:
 
     first_code = next(c for c in cells if c["cell_type"] == "code")
     assert "".join(first_code["source"]) == _render(ref)
-    assert first_code["metadata"]["tags"] == ["colab-setup", "hide-input"]
+    assert first_code["metadata"] == {
+        "cellView": "form",
+        "tags": ["colab-setup", "hide-input"],
+    }
     assert first_code["outputs"] == [] and first_code["execution_count"] is None
     assert (
         sum("colab-setup" in c.get("metadata", {}).get("tags", []) for c in cells) == 1
@@ -321,6 +332,25 @@ def test_fresh_setup_runs_every_step_in_order(
     ):
         assert phrase in printed
     assert "!" not in printed
+
+
+def test_the_wait_is_announced_before_the_install(
+    cell: Cell, capsys: pytest.CaptureFixture[str]
+) -> None:
+    printed_before: list[str] = []
+    stand_in = cell.ns["_run"]
+
+    def run(command: list[str]) -> None:
+        if command[0] == "uv":
+            printed_before.append(capsys.readouterr().out)
+        stand_in(command)
+
+    cell.ns["_run"] = run
+    cell.setup()
+
+    assert len(printed_before) == 1
+    assert "from one to ten minutes" in printed_before[0]
+    assert "print nothing for several minutes" in printed_before[0]
 
 
 @pytest.mark.parametrize("step", ["install", "fetch", "download", "check"])
@@ -621,7 +651,10 @@ def test_sync_writes_link_cell_and_runtime_request(project: Path) -> None:
     assert "![" not in first
     setup = nb["cells"][2]
     assert setup["cell_type"] == "code" and setup["id"] == "colab-setup"
-    assert setup["metadata"] == {"tags": ["colab-setup", "hide-input"]}
+    assert setup["metadata"] == {
+        "cellView": "form",
+        "tags": ["colab-setup", "hide-input"],
+    }
     assert setup["outputs"] == [] and setup["execution_count"] is None
     assert "".join(setup["source"]) == _render("abc1234")
     assert nb["metadata"]["colab"] == {
@@ -912,6 +945,10 @@ def _cell_shown(nb: dict[str, Any]) -> None:
     nb["cells"][2]["metadata"]["tags"] = ["colab-setup"]
 
 
+def _cell_shown_on_colab(nb: dict[str, Any]) -> None:
+    del nb["cells"][2]["metadata"]["cellView"]
+
+
 @pytest.mark.parametrize(
     ("mutate", "expected"),
     [
@@ -926,6 +963,7 @@ def _cell_shown(nb: dict[str, Any]) -> None:
         (_runtime_other, "2025.10"),
         (_cell_with_output, "execution count"),
         (_cell_shown, "exactly the tags"),
+        (_cell_shown_on_colab, "'cellView'"),
     ],
 )
 def test_check_names_each_difference(
