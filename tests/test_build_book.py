@@ -2256,6 +2256,104 @@ def test_a_reference_of_a_page_spelled_with_another_case_is_refused(
     assert snapshot(executed) == before
 
 
+SHOWN_IN_CODE = {
+    "backtick fence": "```markdown\n![d](/Images/FIG.png)\n```\n",
+    "tilde fence": "~~~\n![d](/Images/FIG.png)\n~~~\n",
+    "code-block directive": "```{code-block} markdown\n![d](/Images/FIG.png)\n```\n",
+    "colon code-block": ":::{code-block} markdown\n![d](/Images/FIG.png)\n:::\n",
+    "inline span": "Write `![d](/Images/FIG.png)` to show it.\n",
+    "longer fence holding a shorter one": (
+        "````markdown\n```\n![d](/Images/FIG.png)\n```\n![e](/Images/FIG.png)\n````\n"
+    ),
+    "fence never closed": "```\n![d](/Images/FIG.png)\n",
+}
+
+
+@pytest.mark.usefixtures("case_blind_disk")
+@pytest.mark.parametrize("name", sorted(SHOWN_IN_CODE))
+def test_a_path_in_another_case_shown_inside_code_is_warned_of_and_not_refused(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, name: str
+) -> None:
+    root = make_project(
+        tmp_path, ["notebook_smoke", "no_code"], texts={"no_code": SHOWN_IN_CODE[name]}
+    )
+    write_files(root, ["images/fig.png"])
+    with caplog.at_level("WARNING"):
+        build_book.stage_book(root, root / "_build" / "executed")
+    assert "shown inside code" in caplog.text
+    assert "images/fig.png" in caplog.text
+
+
+REFUSED_OUTSIDE_CODE = {
+    "figure argument": "```{figure} /Images/FIG.png\n:alt: x\n```\n",
+    "link in a note body": ":::{note}\n![d](/Images/FIG.png)\n:::\n",
+    "link after a closed fence": "```\nshown\n```\n![d](/Images/FIG.png)\n",
+    "link after an inline span": "Write `x` then ![d](/Images/FIG.png).\n",
+    "link in a role argument": "{ref}`a` ![d](/Images/FIG.png)\n",
+    "indented block": "Example:\n\n    ![d](/Images/FIG.png)\n",
+    "link in a backtick directive note": "```{note}\n![d](/Images/FIG.png)\n```\n",
+}
+
+
+@pytest.mark.usefixtures("case_blind_disk")
+@pytest.mark.parametrize("name", sorted(REFUSED_OUTSIDE_CODE))
+def test_a_path_in_another_case_outside_code_is_still_refused(
+    tmp_path: Path, name: str
+) -> None:
+    root = make_project(
+        tmp_path,
+        ["notebook_smoke", "no_code"],
+        texts={"no_code": REFUSED_OUTSIDE_CODE[name]},
+    )
+    write_files(root, ["images/fig.png"])
+    with pytest.raises(build_book.BookError) as stop:
+        build_book.stage_book(root, root / "_build" / "executed")
+    assert stop.value.exit_code == build_book.EXIT_FILE_ERROR
+    assert "'/Images/FIG.png'" in str(stop.value)
+    assert "fenced block" in str(stop.value)
+
+
+def test_a_path_correctly_spelled_inside_code_is_still_staged(tmp_path: Path) -> None:
+    root = make_project(
+        tmp_path,
+        ["notebook_smoke", "no_code"],
+        texts={"no_code": "```\n![d](/images/fig.png)\n```\n"},
+    )
+    write_files(root, ["images/fig.png"])
+    build_book.stage_book(root, root / "_build" / "executed")
+    assert (root / "_build" / "executed" / "images" / "fig.png").is_file()
+
+
+@pytest.mark.parametrize(
+    ("text", "code"),
+    [
+        ("plain text", []),
+        ("```\nA\n```\nB", ["A\n"]),
+        ("```py\nA\n```", ["A\n"]),
+        ("~~~\nA\n~~~\nB", ["A\n"]),
+        ("```\nA\n~~~\nB\n```\nC", ["A\n~~~\nB\n"]),
+        ("````\n```\nA\n```\nB\n````\nC", ["```\nA\n```\nB\n"]),
+        ("```\nA\nB", ["A\nB"]),
+        ("```{code-block} Arg\nA\n```", ["A\n"]),
+        ("```{code-cell} python\nA\n```", ["A\n"]),
+        ("```{sourcecode} py\nA\n```", ["A\n"]),
+        (":::{code}\nA\n:::\nB", ["A\n"]),
+        ("```{figure} Arg\nA\n```", []),
+        (":::{note}\nA\n:::\n```\nB\n```", ["B\n"]),
+        ("```{note}\nA\n```\n```\nB\n```", ["B\n"]),
+        ("a `A` b", ["`A`"]),
+        ("a ``A ` B`` b", ["``A ` B``"]),
+        ("{ref}`A` b", []),
+        ("a `A\n\nB` b", []),
+        ("    A\n", []),
+    ],
+)
+def test_code_regions_returns_the_code_of_a_markdown_text(
+    text: str, code: list[str]
+) -> None:
+    assert [text[a:b] for a, b in build_book.code_regions(text)] == code
+
+
 @pytest.mark.usefixtures("case_blind_disk")
 def test_a_reference_of_a_notebook_cell_spelled_with_another_case_is_refused(
     tmp_path: Path,

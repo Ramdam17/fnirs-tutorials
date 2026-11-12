@@ -121,6 +121,16 @@ _DIRECTIVE_PATH = re.compile(
     re.MULTILINE,
 )
 _URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+# Directives whose body is code, not markdown. Taken from the MyST guide on code blocks and
+# code cells (code, code-block, sourcecode, code-cell); this list is not checked against the
+# MyST source, so a code directive it lacks has its body read as prose.
+_CODE_DIRECTIVES = frozenset({"code", "code-block", "sourcecode", "code-cell"})
+_FENCE_OPEN = re.compile(r"^(?P<lead>[ \t>]*)(?P<fence>`{3,}|~{3,}|:{3,})(?P<info>.*)$")
+_DIRECTIVE_NAME = re.compile(r"^\s*\{([^}\s]+)\}")
+# An inline span: a run of backticks, any text of the same paragraph, the same run again.
+_INLINE_CODE = re.compile(
+    r"(?<![`\}])(`+)(?!`)(?:(?!\n[ \t]*\n).)+?(?<!`)\1(?!`)", re.DOTALL
+)
 Runner = Callable[[Path], int]
 
 
@@ -504,6 +514,100 @@ def _local_target(raw: str, page: Path, root: Path) -> Path | None:
     return candidate
 
 
+def code_regions(text: str) -> list[tuple[int, int]]:
+    """Return the character spans of ``text`` that are code, where a path is only shown.
+
+    A span is ``(start, end)``, an offset in ``text`` with ``end`` excluded. Three kinds
+    are code. The content of a fenced block opened by at least three backticks or tildes
+    whose info string does not start with ``{``, closed as CommonMark says by a line of
+    the same character at least as long, or by the end of the text when no line closes it.
+    The body of a code directive (``code``, ``code-block``, ``sourcecode``, ``code-cell``,
+    fenced by backticks, tildes or colons), never its argument on the opening line. And
+    an inline span of backticks that is not the argument of a role such as
+    ``{ref}`name```. The body of any other directive is prose and is searched, as are the
+    lines of its fences.
+
+    Parameters
+    ----------
+    text : str
+        Markdown text of a page, or the markdown cells of a notebook joined.
+
+    Returns
+    -------
+    list of tuple of int
+        The spans, sorted by start.
+
+    Notes
+    -----
+    When to use: to tell a path that a page references from one that it shows as an
+    example. An indented code block (four spaces) is not recognised: its content is read
+    as prose, so a path shown there is treated as a reference, and the way to show one is
+    a fence. A fence inside a blockquote or a list is recognised by its leading ``>`` or
+    spaces, without the nesting rules of CommonMark.
+
+    Examples
+    --------
+    >>> text = "```\n![a](A.png)\n```\n![b](B.png)"
+    >>> [text[a:b] for a, b in code_regions(text)]
+    ['![a](A.png)\n']
+    """
+    regions: list[tuple[int, int]] = []
+    masked: list[str] = []
+    prose_fences: list[tuple[str, int]] = []
+    code_fence: tuple[str, int, int] | None = None
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        bare = line.rstrip("\r\n")
+        opening = _FENCE_OPEN.match(bare)
+        keep = True
+        if code_fence is not None:
+            char, length, start = code_fence
+            keep = False
+            if (
+                opening
+                and opening["fence"][0] == char
+                and len(opening["fence"]) >= length
+                and not opening["info"].strip()
+            ):
+                if start < offset:
+                    regions.append((start, offset))
+                code_fence = None
+        elif opening:
+            fence, info = opening["fence"], opening["info"]
+            if (
+                prose_fences
+                and fence[0] == prose_fences[-1][0]
+                and len(fence) >= prose_fences[-1][1]
+                and not info.strip()
+            ):
+                prose_fences.pop()
+                keep = False
+            elif _opens_code(fence, info):
+                code_fence = (fence[0], len(fence), offset + len(line))
+                keep = False
+            elif info.lstrip().startswith("{"):
+                prose_fences.append((fence[0], len(fence)))
+                keep = False
+        masked.append(line if keep else re.sub(r"[^\r\n]", " ", line))
+        offset += len(line)
+    if code_fence is not None and code_fence[2] < offset:
+        regions.append((code_fence[2], offset))
+    for found in _INLINE_CODE.finditer("".join(masked)):
+        regions.append((found.start(), found.end()))
+    return sorted(regions)
+
+
+def _opens_code(fence: str, info: str) -> bool:
+    """Return True when a fence line opens a block whose content is code."""
+    named = _DIRECTIVE_NAME.match(info)
+    if named:
+        return named.group(1) in _CODE_DIRECTIVES
+    if fence[0] == ":" or info.lstrip().startswith("{"):
+        return False
+    # A backtick fence cannot hold a backtick in its info string: that line is an inline span.
+    return not (fence[0] == "`" and "`" in info)
+
+
 def _page_text(path: Path) -> str:
     """Return the text to search for references: a page, or the markdown cells of a notebook."""
     raw = path.read_text(encoding="utf-8")
@@ -568,19 +672,31 @@ def find_referenced_files(page: Path, root: Path) -> list[Path]:
             text = _page_text(current)
         except (UnicodeDecodeError, OSError):
             continue
-        raws = _LINK_TARGET.findall(text) + [
-            m[1] for m in _DIRECTIVE_PATH.findall(text)
+        regions = code_regions(text)
+        matches = [(m.start(1), m.group(1)) for m in _LINK_TARGET.finditer(text)] + [
+            (m.start(2), m.group(2)) for m in _DIRECTIVE_PATH.finditer(text)
         ]
-        for raw in raws:
+        for position, raw in matches:
             try:
                 target = _local_target(raw, current, root)
             except _Misspelt as error:
+                if any(start <= position < end for start, end in regions):
+                    logger.warning(
+                        "%s: %r is shown inside code and the disk spells it %s; it is "
+                        "not read as a reference and not staged",
+                        current,
+                        raw,
+                        error.spelled,
+                    )
+                    continue
                 raise BookError(
                     EXIT_FILE_ERROR,
                     f"{current}: the reference {raw!r} is spelled differently from the "
                     f"file the disk names, {error.spelled}. This disk ignores case; a "
                     "case-sensitive host (the Linux runner, GitHub Pages) would not "
-                    "find it, while MyST finds it here. Write it as the disk spells it.",
+                    "find it, while MyST finds it here. Write it as the disk spells it, or, if the "
+                    "page only shows it as an example, put it in a fenced block or an inline "
+                    "code span (an indented block is not recognised as code).",
                 ) from None
             if target is None or target in seen:
                 continue
