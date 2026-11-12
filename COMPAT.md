@@ -31,6 +31,7 @@ The site is built with Jupyter Book 2, which is a Python package that bundles th
 | MyST engine (mystmd) | bundled, not installed separately | `uv pip list` shows no `mystmd` package; the bundle `jupyter_book/dist/jupyter-book.cjs` contains `myst-cli` 1.11.0 (read from its source, since `jupyter book --version` reports only the Jupyter Book version) |
 | Node.js | v26.12.0 on the Mac | `node --version` |
 | nodeenv | 1.12.0 | `uv pip list`; used only when no suitable Node.js is found |
+| D3 (interactive illustrations) | 7.9.2, ISC licence | `interactive/vendor/d3.min.js`, the file `dist/d3.min.js` of the npm package `d3` 7.9.2 (280,622 bytes, SHA-256 `912111098ea99503a6f4967361d2bbdc9dbf58cf9c678c8e27e5b02d1a07f0c1`), copied into the repository with its `LICENSE` and loaded by a relative address; `tests/test_interactive.py` pins the size and the hash |
 | book-theme (site theme) | commit `08951401cf4aa6710f040fe34dcf0c1351a08639`, 2026-11-10, message "v2.0.0 from ea08e186" | the zip comment of the archive that the first build downloaded (`_build/templates/site/myst/book-theme/template.zip`); `myst.yml` pins the archive of this commit |
 
 The theme repository `myst-templates/book-theme` has no tag, so the pin is a commit; the bare name `book-theme` would follow its `main` branch. The pinned archive was rebuilt from an empty `_build/templates` on 2026-11-11 and renders the same three pages.

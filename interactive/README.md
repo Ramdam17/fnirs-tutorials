@@ -4,7 +4,11 @@ This folder holds standalone HTML and JavaScript illustrations embedded in book 
 
 ## Adding an illustration
 
-An illustration is one HTML file in this folder, with its styles and its script written inside it. It loads nothing from another host: no script from a content-delivery network, no web font, no image by address. The test `tests/test_interactive.py` fails when a file does, so that a page keeps working offline, on Colab and on the deployed site. An address that is only compared with a string, such as the SVG namespace, is not a load and is accepted. A link that a reader clicks (an `<a href>`) is not a load either.
+An illustration is one HTML file in this folder, with its styles and its script written inside it. It may load one script, the vendored D3, by a relative address such as `<script src="vendor/d3.min.js"></script>`, and nothing else: no script from a content-delivery network, no web font, no image by address. The test `tests/test_interactive.py` fails when a file loads from another host, or loads a script that is not a relative address resolving to a file under `interactive/vendor/`, so that a page keeps working offline, on Colab and on the deployed site. An address that is only compared with a string, such as the SVG namespace, is not a load and is accepted. A link that a reader clicks (an `<a href>`) is not a load either.
+
+## Drawing approach
+
+The illustrations are drawn with D3 7.9.2, which is copied into this repository as `interactive/vendor/d3.min.js` with its `LICENSE` and loaded from there, so that there is no build step and no other host. To update the library, replace the file and its `LICENSE` with those of the npm package `d3` at the new version (`dist/d3.min.js`), then change the version, the size and the SHA-256 in `tests/test_interactive.py` and in `COMPAT.md`.
 
 The folder is published as it is: the build copies everything under `interactive/` into the site, so a file at `interactive/banana.html` is served at `<base>/interactive/banana.html`, where the base is empty when the book is built locally and `/fnirs-tutorials` on the deployed book. A hidden file and a `__pycache__` folder are left out. This README is published too, at `<base>/interactive/README.md`.
 
@@ -29,4 +33,4 @@ The frame takes its height from `book/interactive-frames.css`, which gives every
 
 ## Previewing it
 
-Open the HTML file directly in a browser to work on the drawing, since it needs no server. To see it in the book, build the site as above and serve the built folder with `python -m http.server --directory _build/executed/_build/html`; for a build with a base URL, serve a folder that holds the built site under a folder named `fnirs-tutorials`, so that the frame is requested at the address the page holds.
+Open the HTML file directly in a browser to work on the drawing, since it needs no server: the file finds `vendor/d3.min.js` next to it. To see it in the book, build the site as above and serve the built folder with `python -m http.server --directory _build/executed/_build/html`; for a build with a base URL, serve a folder that holds the built site under a folder named `fnirs-tutorials`, so that the frame is requested at the address the page holds.
