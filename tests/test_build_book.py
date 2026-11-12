@@ -2670,6 +2670,7 @@ def test_the_plan_lists_every_operation_below_the_staging_folder_and_changes_not
     plan = build_book.plan_stage(root, executed)
     assert snapshot(executed) == before
     removals = [op.path for op in plan.operations if op.kind == "remove"]
+    removals_rel = [path.relative_to(executed).as_posix() for path in removals]
     assert removals == [
         executed / "_build" / "site",
         executed / "_build" / "html",
@@ -2685,8 +2686,37 @@ def test_the_plan_lists_every_operation_below_the_staging_folder_and_changes_not
         between = [a for a in op.path.parents if executed in a.parents]
         assert not any(folder.is_symlink() for folder in between)
         assert not (op.kind == "copy" and op.path.is_symlink())
+    elsewhere = snapshot_beside(tmp_path, executed)
     build_book.execute_stage(plan)
     assert snapshot(outside) == beyond
+    assert snapshot_beside(tmp_path, executed) == elsewhere
+    after = snapshot(executed)
+    changed = {key for key, value in after.items() if before.get(key) != value}
+    gone = set(before) - set(after)
+    writes = {op.path.relative_to(executed).as_posix() for op in plan.copies}
+    above = {
+        parent.as_posix()
+        for write in writes
+        for parent in Path(write).parents
+        if parent != Path(".")
+    }
+    assert {key for key in changed if after[key][0] != "dir"} == writes
+    assert {key for key in changed if after[key][0] == "dir"} <= above
+    assert gone
+    assert all(
+        any(key == removal or key.startswith(removal + "/") for removal in removals_rel)
+        for key in gone
+    )
+
+
+def snapshot_beside(folder: Path, staging: Path) -> dict[str, tuple[Any, ...]]:
+    """Describe everything under ``folder`` except the staging folder."""
+    inside = staging.relative_to(folder).as_posix()
+    return {
+        key: value
+        for key, value in snapshot(folder).items()
+        if key != inside and not key.startswith(inside + "/")
+    }
 
 
 @pytest.mark.usefixtures("case_blind_disk")
