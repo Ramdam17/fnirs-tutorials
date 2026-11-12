@@ -2,9 +2,10 @@
 
 The notebooks are executed first, by ``tests/test_notebooks.py``, which writes the
 executed copies under ``_build/executed/`` at the notebooks' own relative paths. This
-script stages ``myst.yml``, the pages of the table of contents that are not notebooks and
-the local files that those pages, the markdown cells of the notebooks and ``myst.yml``
-reference next to those copies, runs
+script stages ``myst.yml``, the pages of the table of contents that are not notebooks, the
+local files that those pages, the markdown cells of the notebooks and ``myst.yml``
+reference, and the files of the folders that ``project.static_files`` names (the
+illustrations of ``interactive/``) next to those copies, runs
 ``jupyter book build --html --strict`` in that folder without ``--execute``, and reads the page
 files that MyST wrote under ``_build/site/content/``. It exits non-zero when
 
@@ -15,8 +16,9 @@ files that MyST wrote under ``_build/site/content/``. It exits non-zero when
   because nothing executes it here, unless the page's own front matter says
   ``execute: {skip: true}``;
 * a file of the table of contents has no built page;
-* a built page holds a frame (an ``{iframe}``), whatever its source: the book has no way
-  yet to publish the target of a frame or to check that a frame shows something;
+* a built page holds a frame (an ``{iframe}``) whose source is not the base URL of the
+  build followed by ``/interactive/<path>``, with ``<path>`` a file that the build
+  published under ``_build/html/interactive/`` (see :func:`check_frames`);
 * the executed copy of a notebook is missing, older than its source or than the helper
   package under ``src/``, or the timings file of the notebook command does not record
   the notebook as ``passed``.
@@ -46,6 +48,7 @@ Examples
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import logging
 import os
@@ -62,6 +65,10 @@ logger = logging.getLogger("build_book")
 
 DEFAULT_ROOT = Path(__file__).resolve().parents[1]
 EXECUTED_SUBDIR = Path("_build") / "executed"
+# The only place a frame may point to: MyST copies the folders named by
+# ``project.static_files`` into the built site under their own name.
+INTERACTIVE_SUBDIR = "interactive"
+INTERACTIVE_PREFIX = f"/{INTERACTIVE_SUBDIR}/"
 # MyST writes one JSON file per page here, relative to the folder it was run in.
 SITE_SUBDIR = Path("_build") / "site"
 HTML_SUBDIR = Path("_build") / "html"
@@ -512,6 +519,82 @@ def find_config_files(
     return found
 
 
+def find_static_files(
+    document: dict[str, Any], myst_path: Path, root: Path
+) -> list[Path]:
+    """List the files of the folders and files that ``project.static_files`` names.
+
+    MyST copies each entry into the built site, a folder recursively under its own name
+    (https://mystmd.org/guide/website-downloads), so what is staged here is what the site
+    publishes. A file or folder whose name starts with a dot is left out, so that
+    ``.DS_Store`` or a hidden editor file is never published, and so is a
+    ``__pycache__`` folder.
+
+    Parameters
+    ----------
+    document : dict
+        The loaded ``myst.yml``.
+    myst_path : Path
+        Path of ``myst.yml``; its folder is the base of the entries.
+    root : Path
+        Repository root.
+
+    Returns
+    -------
+    list of Path
+        Absolute paths of the files to stage, in sorted order, each once.
+
+    Raises
+    ------
+    BookError
+        With ``EXIT_FILE_ERROR`` when ``static_files`` is not a list of strings, when an
+        entry does not exist, or when it lies outside the repository or under ``data/`` or
+        ``_build/``. A static folder that is missing would publish a frame target that
+        does not exist, and MyST would not say so.
+    """
+    project = document.get("project")
+    entries = project.get("static_files", []) if isinstance(project, dict) else []
+    if not isinstance(entries, list) or not all(isinstance(e, str) for e in entries):
+        raise BookError(
+            EXIT_FILE_ERROR,
+            f"{myst_path}: project.static_files must be a list of paths, got {entries!r}.",
+        )
+    found: list[Path] = []
+    for entry in entries:
+        path = (myst_path.parent / entry).resolve()
+        try:
+            relative = path.relative_to(root.resolve())
+        except ValueError:
+            raise BookError(
+                EXIT_FILE_ERROR,
+                f"static_files entry {entry!r} points outside the repository {root}.",
+            ) from None
+        if not relative.parts or relative.parts[0] in NEVER_STAGED:
+            raise BookError(
+                EXIT_FILE_ERROR,
+                f"static_files entry {entry!r} is the repository itself or under "
+                f"{'/ or '.join(NEVER_STAGED)}/, which are never staged.",
+            )
+        if path.is_file():
+            candidates = [path]
+        elif path.is_dir():
+            candidates = sorted(p for p in path.rglob("*") if p.is_file())
+        else:
+            raise BookError(
+                EXIT_FILE_ERROR,
+                f"static_files entry {entry!r} of {myst_path} names no file or folder "
+                f"({path}); a frame that points into it would have no target.",
+            )
+        for candidate in candidates:
+            parts = candidate.relative_to(path if path.is_dir() else path.parent).parts
+            if any(part.startswith(".") or part == "__pycache__" for part in parts):
+                logger.info("Not staged (hidden or cache file): %s", candidate)
+                continue
+            if candidate not in found:
+                found.append(candidate)
+    return found
+
+
 def remove_stale_site(stage_dir: Path) -> list[Path]:
     """Remove the site and the HTML of an earlier build from the staging folder.
 
@@ -559,10 +642,13 @@ def check_executed_dir(root: Path, executed_dir: Path) -> None:
 def stage_book(root: Path, executed_dir: Path) -> StagedBook:
     """Stage ``myst.yml``, the non-notebook pages and their references.
 
-    The references of the notebooks (their markdown cells) and the files that
-    ``myst.yml`` names are staged too; the notebooks themselves are not, since the
-    staging folder holds their executed copies. The target of an ``{iframe}`` is not
-    staged, because the build does not publish it.
+    The references of the notebooks (their markdown cells), the files that ``myst.yml``
+    names (the plugin and the style file among them, found by :func:`find_config_files`)
+    and the files of the folders of ``project.static_files`` (found by
+    :func:`find_static_files`) are staged too; the notebooks themselves are not, since the
+    staging folder holds their executed copies. The target of an ``{iframe}`` is not found
+    by reading the page: it is staged because it lies in a static folder, and MyST
+    publishes that folder.
 
     Parameters
     ----------
@@ -608,6 +694,7 @@ def stage_book(root: Path, executed_dir: Path) -> StagedBook:
         sources.append(config_file)
         if config_file.suffix.lower() == ".md":
             sources.extend(find_referenced_files(config_file, root))
+    sources.extend(find_static_files(load_myst_document(myst_path), myst_path, root))
     copied: set[Path] = set()
     for source in sources:
         resolved = source.resolve()
@@ -641,8 +728,9 @@ def run_jupyter_book(stage_dir: Path) -> int:
     ``bibliography`` file of ``myst.yml``, still exit 0 under it, and so does a missing
     local page named by an ``{iframe}`` (no message at all), and an entry of the table of
     contents that does not exist; that is why :func:`stage_book` stages the files a page
-    references, :func:`check_frames` refuses the frames and :func:`check_built_pages`
-    compares the table of contents with the built pages.
+    references and the static folders, :func:`check_frames` checks that the target of every
+    frame was published and :func:`check_built_pages` compares the table of contents with
+    the built pages.
     A citation of a DOI that doi.org does not answer is an error of the page too: with
     doi.org unreachable, the same page exits 0 without ``--strict`` and 1 with it, so a
     network failure outside the repository can fail the build.
@@ -754,8 +842,10 @@ def find_frame_sources(mdast: Any) -> list[str]:
     Returns
     -------
     list of str
-        The source of each frame as written in the page, in no particular order. MyST records it unchanged: a
-        relative path stays relative and a root-relative path does not gain the base URL.
+        The source of each frame as recorded in the built page, in no particular order.
+        MyST records the source as written, a relative path unchanged and a root path
+        without the base URL; only the plugin of the book adds the base URL, and only to a
+        source that starts with ``/interactive/``.
     """
     sources: list[str] = []
     stack = [mdast]
@@ -770,35 +860,161 @@ def find_frame_sources(mdast: Any) -> list[str]:
     return sources
 
 
-def check_frames(location: str, page: dict[str, Any]) -> list[BookError]:
-    """Refuse every frame of a built page, whatever its source.
+def normalize_base_url(raw: str | None) -> str:
+    """Return the base URL of the build without trailing slashes, or ``""`` when unset.
 
-    The book has no way yet to publish the target of a frame, nor to check that a frame
-    shows something, so a page with a frame would be published with a frame that may be
-    empty and every other check green. Every frame is refused until the rule that accepts
-    one is written together with that way.
+    The caller passes the base URL in the environment variable ``BASE_URL``; MyST reads it
+    the same way, and the plugin of the book prefixes it to the source of a frame.
+    """
+    return (raw or "").strip().rstrip("/")
+
+
+def _frame_refusal(src: str, base_url: str, interactive_dir: Path | None) -> str | None:
+    """Say why a frame source is refused, or return None when it is accepted.
+
+    The accepted shape is ``<base_url>/interactive/<path>``, with ``<path>`` made of plain
+    file names, naming a file of ``interactive_dir``, the ``interactive`` folder of the
+    built site.
+    """
+    prefix = f"{base_url}{INTERACTIVE_PREFIX}"
+    if not src.startswith(prefix):
+        if _URL_SCHEME.match(src):
+            return (
+                "it has a scheme, and no page loads an illustration from another host"
+            )
+        if src.startswith("//"):
+            return "it names another host"
+        if not src.startswith("/"):
+            return "it is a relative path, which depends on the address the page is read at"
+        if base_url and src.startswith(INTERACTIVE_PREFIX):
+            return (
+                f"it does not start with the base URL {base_url!r} of this build, so the "
+                "browser would ask the host for a file outside the book"
+            )
+        return f"it is a root path outside {INTERACTIVE_PREFIX!r}"
+    path = src[len(prefix) :]
+    segments = path.split("/")
+    if (
+        not path
+        or any(s in ("", ".", "..") for s in segments)
+        or re.search(r"[?#%\\]", path)
+    ):
+        return (
+            "the part after the folder name is empty, leaves the folder, or holds a "
+            "query, a fragment, a percent sign or a backslash"
+        )
+    if interactive_dir is None:
+        return "no built site was given to look for the target in"
+    target = (interactive_dir / path).resolve()
+    try:
+        target.relative_to(interactive_dir.resolve())
+    except ValueError:
+        return "its target is outside the interactive folder of the built site"
+    if not is_file_or_absent(target):
+        return (
+            f"its target {target} does not exist: the build did not publish it, and "
+            "MyST says nothing when a frame target is missing"
+        )
+    return None
+
+
+def _html_page_path(html_dir: Path, slug: str) -> Path:
+    """Return the HTML file MyST writes for a page slug: ``<slug>/index.html``."""
+    return (
+        html_dir / "index.html" if slug == "index" else html_dir / slug / "index.html"
+    )
+
+
+_IFRAME_SRC = re.compile(r"<iframe\b[^>]*?\bsrc=\"([^\"]*)\"")
+
+
+def check_frames(
+    location: str,
+    page: dict[str, Any],
+    base_url: str = "",
+    html_dir: Path | None = None,
+) -> list[BookError]:
+    """Check the frames of a built page: each must point at a file the build published.
+
+    A frame is accepted when its source is exactly ``<base_url>/interactive/<path>`` and
+    ``<path>`` is a file under ``<html_dir>/interactive/``. Nothing else is accepted: a
+    relative source (it holds only at one of the two addresses a page is reached at), a
+    source with a scheme (https included, since no page needs one), a protocol-relative
+    source, a root path outside ``/interactive/``, a source without the base URL when the
+    build has one, a path that leaves the folder, and a target the build did not publish
+    (MyST says nothing about a missing one, even under ``--strict``).
+
+    Two built files are read, and both must agree. The rule is applied to the ``src`` of
+    the ``iframe`` node in the page file under ``_build/site/content/``, which is what the
+    plugin of the book rewrote and what :func:`find_frame_sources` reads. The page that is
+    deployed is the HTML under ``_build/html/<slug>/index.html``, so that file is read too
+    and must hold an ``<iframe>`` tag with the same ``src``; a page file and an HTML file
+    that disagree (a change of the theme, for example) are refused. The source page of
+    the book is not read: the plugin leaves it unchanged, so it does not show the base URL.
+
+    Parameters
+    ----------
+    location : str
+        ``location`` of the page, for the message.
+    page : dict
+        The page file as read by :func:`read_built_pages`.
+    base_url : str, optional
+        Base URL of the build, without trailing slash; ``""`` when unset.
+    html_dir : Path, optional
+        ``_build/html`` of the build. When omitted every frame is refused, since its
+        target cannot be found.
 
     Returns
     -------
     list of BookError
-        One per frame, with ``EXIT_FRAME``; the message names the page and the source.
+        One per refused frame, with ``EXIT_FRAME``; the message names the page, the source
+        as found, why it is refused and what is accepted.
     """
-    return [
-        BookError(
-            EXIT_FRAME,
-            f"page {location!r} holds a frame whose source is {src!r}. The book has no "
-            "way yet to publish the target of a frame or to check that a frame shows "
-            "something, so every frame is refused until the rule that accepts one is "
-            "written with that way.",
+    problems: list[BookError] = []
+    interactive_dir = html_dir / INTERACTIVE_SUBDIR if html_dir is not None else None
+    html_sources: list[str] | None = None
+    for src in find_frame_sources(page["mdast"]):
+        reason = _frame_refusal(src, base_url, interactive_dir)
+        if reason is None and html_dir is not None:
+            if html_sources is None:
+                slug = page.get("slug")
+                html_file = (
+                    _html_page_path(html_dir, slug) if isinstance(slug, str) else None
+                )
+                try:
+                    text = html_file.read_text(encoding="utf-8") if html_file else ""
+                except OSError:
+                    text = ""
+                html_sources = [html.unescape(s) for s in _IFRAME_SRC.findall(text)]
+            if src not in html_sources:
+                reason = (
+                    "the HTML page that is deployed does not hold an iframe with this "
+                    f"source (it holds {html_sources!r})"
+                )
+        if reason is None:
+            continue
+        where = (
+            interactive_dir
+            if interactive_dir is not None
+            else "_build/html/interactive"
         )
-        for src in find_frame_sources(page["mdast"])
-    ]
+        problems.append(
+            BookError(
+                EXIT_FRAME,
+                f"page {location!r} holds a frame whose source is {src!r}, which is "
+                f"refused because {reason}. A frame is accepted only when its source is "
+                f"{base_url}{INTERACTIVE_PREFIX}<path>, with <path> a file under {where}.",
+            )
+        )
+    return problems
 
 
 def check_built_pages(
     pages: dict[str, dict[str, Any]],
     toc_files: list[str],
     notebooks: list[str],
+    base_url: str = "",
+    html_dir: Path | None = None,
 ) -> list[BookError]:
     """Check the pages MyST built against the table of contents.
 
@@ -810,13 +1026,17 @@ def check_built_pages(
         ``file:`` entries of the table of contents.
     notebooks : list of str
         The entries of ``toc_files`` that are notebooks.
+    base_url : str, optional
+        Base URL of the build, without trailing slash (see :func:`normalize_base_url`).
+    html_dir : Path, optional
+        ``_build/html`` of the build, where the targets of the frames are looked for.
 
     Returns
     -------
     list of BookError
         One per problem, empty when the pages are accepted: a page that is not a
-        notebook and holds code to execute, a frame whose source is not an https
-        URL, and a file of the table of contents with no built page.
+        notebook and holds code to execute, a frame that :func:`check_frames` refuses,
+        and a file of the table of contents with no built page.
     """
     problems: list[BookError] = []
     for location, page in sorted(pages.items()):
@@ -840,7 +1060,7 @@ def check_built_pages(
             )
         )
     for location, page in sorted(pages.items()):
-        problems.extend(check_frames(location, page))
+        problems.extend(check_frames(location, page, base_url, html_dir))
     for name in toc_files:
         if f"/{name}" not in pages:
             kind = "notebook" if name in notebooks else "page"
@@ -891,6 +1111,8 @@ def build_book(root: Path, executed_dir: Path, runner: Runner) -> StagedBook:
         pages,
         staged.toc_files,
         staged.notebooks,
+        normalize_base_url(os.environ.get("BASE_URL")),
+        staged.stage_dir / HTML_SUBDIR,
     )
     for problem in problems:
         logger.error("%s", problem)
