@@ -15,9 +15,26 @@ project:
   toc:
     - file: book/00_landscape.md
     - file: book/smoke/smoke_cedalion.ipynb
+    # Test page for the embedding of interactive illustrations; it leaves the book before the
+    # first release.
+    - file: book/smoke/interactive_smoke.md
     - file: book/glossary.md
+  # MyST copies this folder into the built site as /interactive/..., which is what a frame
+  # of a page points to; without it the frame would ask for a file that was never published
+  # (https://mystmd.org/guide/website-downloads).
+  static_files:
+    - interactive
+  # Puts the base URL of the build in front of a frame source that starts with
+  # /interactive/, because MyST keeps the source as written and the deployed book lives under
+  # a base URL. scripts/build_book.py checks the result.
+  plugins:
+    - plugins/iframe-base-url.mjs
 site:
   # Pinned to one commit of myst-templates/book-theme: the bare name 'book-theme'
   # follows the theme's main branch. To move the pin, change the commit, rebuild from an
   # empty _build/templates, and update COMPAT.md.
   template: https://github.com/myst-templates/book-theme/archive/08951401cf4aa6710f040fe34dcf0c1351a08639.zip
+  options:
+    # Gives the frames of the interactive illustrations the height their pages need; the
+    # {iframe} directive has no height option.
+    style: book/interactive-frames.css

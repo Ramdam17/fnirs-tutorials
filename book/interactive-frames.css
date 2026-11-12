@@ -1,0 +1,27 @@
+/* Size of the frames that hold an interactive illustration.
+ *
+ * Why this file exists. The theme draws a frame in a wrapper whose height is 60 per cent of
+ * its width (an inline padding-bottom) and whose width is 70 per cent of the article unless
+ * the page says otherwise. The {iframe} directive has no height option, and a pixel width
+ * is converted to a wrong percentage, so the size of a frame can only be set from the
+ * style sheet. At the default size the illustrations scroll inside their frame, which hides
+ * part of a plot and puts a scroll bar inside the page.
+ *
+ * Why one height for every illustration. The eight planned illustrations are drawn to one
+ * layout, a control row above plots whose width follows the frame, so one height has to
+ * hold the tallest of them; a page that needs less leaves blank space under its plots,
+ * which costs less than a different frame height for each page. The first illustration
+ * needs 558 px of height at a frame width of 693 px and 621 px at a width of 366 px (its
+ * text wraps), measured in a browser, so 720 px leaves room for both. An illustration that
+ * needs more gets its own rule, selected by its file, for example
+ * `iframe[src$="/banana.html"]`, written next to this one.
+ *
+ * How the frame is selected. The wrapper is chosen by the frame it holds, an iframe whose
+ * source is under /interactive/, and not by the text of its inline style, so a change of
+ * the theme's percentage does not break the rule. The inline style of the wrapper sets
+ * padding-bottom and width, hence !important. */
+div:has(> iframe[src*="/interactive/"]) {
+  padding-bottom: 0 !important;
+  height: 720px;
+  width: 100% !important;
+}
