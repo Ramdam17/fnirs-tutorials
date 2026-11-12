@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Convolved block response, test page</title>
+<style>
+  /* Colours are copied from src/fnirs_tutorials/style.py (PALETTE and STYLE) so that
+     the page matches the static figures. The canvas is light in both modes of the
+     book, as the figures are, so the page does not follow the dark mode. */
+  :root {
+    --canvas: #ffffff;
+    --text: #1f2328;          /* STYLE["text.color"] */
+    --tick: #656d76;          /* STYLE["xtick.color"] */
+    --axis: #d0d7de;          /* STYLE["axes.edgecolor"] */
+    --grid: #d8dee4;          /* STYLE["grid.color"] */
+    --boxcar: #3b82f6;        /* PALETTE[4] */
+    --response: #059669;      /* PALETTE[3] */
+    --convolution: #7c3aed;   /* PALETTE[0] */
+  }
+  * { box-sizing: border-box; }
+  html { color-scheme: light; }
+  body {
+    margin: 0;
+    padding: 12px 16px 16px;
+    background: var(--canvas);
+    color: var(--text);
+    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .notice { margin: 0 0 12px; color: var(--tick); }
+  .control { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin: 0 0 8px; }
+  .control label { font-weight: 600; min-width: 11em; }
+  .control input[type="range"] { flex: 1 1 200px; min-width: 160px; height: 32px; accent-color: var(--convolution); }
+  #plot { width: 100%; }
+  #plot svg { display: block; width: 100%; height: auto; }
+  svg text { font: 12px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; fill: var(--text); }
+  svg .tick-label { fill: var(--tick); }
+  svg .axis-title { font-size: 12px; }
+  svg .curve-label { font-weight: 600; }
+  .readout { margin: 6px 0 0; color: var(--tick); font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+
+<p class="notice">This is a test page for the embedding path. The chapter on the haemodynamic response rebuilds this illustration with its sources.</p>
+
+<div class="control">
+  <label for="block-length">Block length: <output id="block-value" for="block-length">10 s</output></label>
+  <input id="block-length" type="range" min="1" max="40" step="0.5" value="10" aria-describedby="readout">
+</div>
+
+<div id="plot" role="img" aria-label="Three stacked plots over time in seconds: a boxcar, a double-gamma response, and their convolution."></div>
+<p id="readout" class="readout" aria-live="polite"></p>
+
+<script>
+"use strict";
+
+/* ---- Constants ---------------------------------------------------------- */
+
+// Placeholder values of the common canonical double-gamma shape (a positive lobe
+// peaking near 6 s, an undershoot peaking near 16 s, and a ratio of 1 to 6 between
+// their heights). They are to be sourced when the chapter is written. A gamma
+// density of integer shape k and unit scale has its mode at k - 1 seconds.
+const PEAK_SHAPE = 7;
+const UNDERSHOOT_SHAPE = 17;
+const UNDERSHOOT_RATIO = 1 / 6;
+
+const TIME_STEP_S = 0.1;      // grid step of the convolution
+const TIME_END_S = 80;        // the plots run from 0 s to this time
+const BLOCK_ONSET_S = 0;      // the boxcar starts here
+const HRF_LENGTH_S = 40;      // the response is taken as zero after this time
+
+const PANEL_HEIGHT = 104;
+const PANEL_GAP = 22;
+const MARGIN = { top: 8, right: 14, bottom: 46, left: 62 };
+const X_TICK_STEP_S = 10;
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/* ---- Mathematics -------------------------------------------------------- */
+
+// Natural log of the gamma function for integer arguments: ln((k - 1)!).
+function logFactorial(n) {
+  let s = 0;
+  for (let i = 2; i <= n; i += 1) s += Math.log(i);
+  return s;
+}
+
+// Density of a gamma distribution of integer shape k and unit scale.
+function gammaPdf(t, k) {
+  if (t <= 0) return 0;
+  return Math.exp((k - 1) * Math.log(t) - t - logFactorial(k - 1));
+}
+
+// Double-gamma response sampled on the grid, scaled so that its peak is 1.
+function makeResponse() {
+  const n = Math.round(HRF_LENGTH_S / TIME_STEP_S) + 1;
+  const h = new Float64Array(n);
+  let peak = 0;
+  for (let i = 0; i < n; i += 1) {
+    const t = i * TIME_STEP_S;
+    h[i] = gammaPdf(t, PEAK_SHAPE) - UNDERSHOOT_RATIO * gammaPdf(t, UNDERSHOOT_SHAPE);
+    peak = Math.max(peak, h[i]);
+  }
+  for (let i = 0; i < n; i += 1) h[i] /= peak;
+  return h;
+}
+
+// Boxcar of height 1 from BLOCK_ONSET_S to BLOCK_ONSET_S + length.
+function makeBoxcar(length) {
+  const n = Math.round(TIME_END_S / TIME_STEP_S) + 1;
+  const b = new Float64Array(n);
+  for (let i = 0; i < n; i += 1) {
+    const t = i * TIME_STEP_S;
+    b[i] = t >= BLOCK_ONSET_S - 1e-9 && t < BLOCK_ONSET_S + length - 1e-9 ? 1 : 0;
+  }
+  return b;
+}
+
+// Discrete convolution y[i] = sum_j h[j] b[i - j] * dt, truncated to the plot window.
+function convolve(b, h) {
+  const y = new Float64Array(b.length);
+  for (let i = 0; i < b.length; i += 1) {
+    let s = 0;
+    const jMax = Math.min(i, h.length - 1);
+    for (let j = 0; j <= jMax; j += 1) s += h[j] * b[i - j];
+    y[i] = s * TIME_STEP_S;
+  }
+  return y;
+}
+
+/* ---- Scales and axes ---------------------------------------------------- */
+
+function linearScale(d0, d1, r0, r1) {
+  return (v) => r0 + ((v - d0) / (d1 - d0)) * (r1 - r0);
+}
+
+function el(name, attrs, text) {
+  const node = document.createElementNS(SVG_NS, name);
+  for (const key of Object.keys(attrs || {})) node.setAttribute(key, attrs[key]);
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function niceTicks(max, count) {
+  const raw = max / count;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= raw);
+  const ticks = [];
+  for (let v = 0; v <= max + 1e-9; v += step) ticks.push(Number(v.toFixed(6)));
+  return ticks;
+}
+
+function formatTick(v) {
+  return Number.isInteger(v) ? String(v) : v.toFixed(1);
+}
+
+function drawPanel(svg, geom, spec) {
+  const { left, width, top, height } = geom;
+  const xScale = linearScale(0, TIME_END_S, left, left + width);
+  const yScale = linearScale(spec.yMax, spec.yMin, top, top + height);
+  const g = el("g");
+
+  // Vertical grid and x ticks (labels only on the bottom panel).
+  for (let t = 0; t <= TIME_END_S; t += X_TICK_STEP_S) {
+    g.appendChild(el("line", { x1: xScale(t), x2: xScale(t), y1: top, y2: top + height, stroke: "var(--grid)", "stroke-width": 0.5 }));
+    g.appendChild(el("line", { x1: xScale(t), x2: xScale(t), y1: top + height, y2: top + height + 4, stroke: "var(--axis)" }));
+    if (spec.showTimeLabels) {
+      g.appendChild(el("text", { x: xScale(t), y: top + height + 17, "text-anchor": "middle", class: "tick-label" }, String(t)));
+    }
+  }
+
+  // Horizontal grid, y ticks and tick labels.
+  for (const v of spec.yTicks) {
+    g.appendChild(el("line", { x1: left, x2: left + width, y1: yScale(v), y2: yScale(v), stroke: "var(--grid)", "stroke-width": 0.5 }));
+    g.appendChild(el("line", { x1: left - 4, x2: left, y1: yScale(v), y2: yScale(v), stroke: "var(--axis)" }));
+    g.appendChild(el("text", { x: left - 7, y: yScale(v) + 4, "text-anchor": "end", class: "tick-label" }, formatTick(v)));
+  }
+
+  // Axis lines and the y axis title, rotated.
+  g.appendChild(el("line", { x1: left, x2: left, y1: top, y2: top + height, stroke: "var(--axis)" }));
+  g.appendChild(el("line", { x1: left, x2: left + width, y1: top + height, y2: top + height, stroke: "var(--axis)" }));
+  const cx = 14;
+  const cy = top + height / 2;
+  g.appendChild(el("text", { x: cx, y: cy, transform: `rotate(-90 ${cx} ${cy})`, "text-anchor": "middle", class: "axis-title" }, spec.yTitle));
+  svg.appendChild(g);
+  return { xScale, yScale };
+}
+
+/* ---- Drawing of the curves ---------------------------------------------- */
+
+function pathFor(values, xScale, yScale) {
+  let d = "";
+  for (let i = 0; i < values.length; i += 1) {
+    d += (i === 0 ? "M" : "L") + xScale(i * TIME_STEP_S).toFixed(2) + " " + yScale(values[i]).toFixed(2);
+  }
+  return d;
+}
+
+function drawCurve(svg, scales, values, colour, label, labelAt, geom) {
+  svg.appendChild(el("path", { d: pathFor(values, scales.xScale, scales.yScale), fill: "none", stroke: colour, "stroke-width": 2.2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+  // Direct label: a short swatch of the curve colour, then the name in the text colour.
+  // The offset shrinks on a narrow frame so that the label stays inside the plot.
+  const x = geom.left + 10 + Math.max(0, Math.min(labelAt.dx, geom.width - 190));
+  const y = geom.top + 12 + labelAt.dy;
+  svg.appendChild(el("line", { x1: x, x2: x + 18, y1: y - 4, y2: y - 4, stroke: colour, "stroke-width": 2.2, "stroke-linecap": "round" }));
+  svg.appendChild(el("text", { x: x + 24, y, class: "curve-label" }, label));
+}
+
+const response = makeResponse();
+const responseArea = response.reduce((s, v) => s + v, 0) * TIME_STEP_S;
+const timeAxis = Array.from({ length: Math.round(TIME_END_S / TIME_STEP_S) + 1 }, (_, i) => i * TIME_STEP_S);
+const responseOnPlot = timeAxis.map((_, i) => (i < response.length ? response[i] : 0));
+
+function render(width, length) {
+  const plot = document.getElementById("plot");
+  const innerWidth = Math.max(120, width - MARGIN.left - MARGIN.right);
+  const height = MARGIN.top + 3 * PANEL_HEIGHT + 2 * PANEL_GAP + MARGIN.bottom;
+  const svg = el("svg", { viewBox: `0 0 ${width} ${height}`, width, height, "aria-hidden": "true" });
+
+  const boxcar = makeBoxcar(length);
+  const conv = convolve(boxcar, response);
+  const convMax = Math.max(...conv);
+  const plateauAxisMax = Math.ceil(responseArea);   // the axis is fixed so that the slider visibly changes the curve
+
+  const panels = [
+    { values: boxcar, colour: "var(--boxcar)", label: "Boxcar", yMin: 0, yMax: 1.2, yTicks: [0, 0.5, 1], yTitle: "Stimulus (a.u.)", labelAt: { dx: 0, dy: 0 } },
+    { values: responseOnPlot, colour: "var(--response)", label: "Haemodynamic response", yMin: -0.4, yMax: 1.2, yTicks: [-0.4, 0, 0.5, 1], yTitle: "Response (a.u.)", labelAt: { dx: 150, dy: 0 } },
+    { values: conv, colour: "var(--convolution)", label: "Convolution", yMin: -1, yMax: plateauAxisMax, yTicks: niceTicks(plateauAxisMax, 3), yTitle: "Convolution (a.u. · s)", labelAt: { dx: 0, dy: 0 } },
+  ];
+  // The convolution can dip below zero in its undershoot; keep the zero line visible.
+  panels[2].yMin = Math.min(-0.5, Math.floor(Math.min(...conv) * 2) / 2);
+
+  panels.forEach((spec, k) => {
+    const geom = { left: MARGIN.left, width: innerWidth, top: MARGIN.top + k * (PANEL_HEIGHT + PANEL_GAP), height: PANEL_HEIGHT };
+    spec.showTimeLabels = k === panels.length - 1;
+    const scales = drawPanel(svg, geom, spec);
+    drawCurve(svg, scales, spec.values, spec.colour, spec.label, spec.labelAt, geom);
+  });
+
+  const xTitleY = MARGIN.top + 3 * PANEL_HEIGHT + 2 * PANEL_GAP + 38;
+  svg.appendChild(el("text", { x: MARGIN.left + innerWidth / 2, y: xTitleY, "text-anchor": "middle", class: "axis-title" }, "Time (s)"));
+
+  plot.replaceChildren(svg);
+  document.getElementById("readout").textContent =
+    `Area of the response: ${responseArea.toFixed(2)} s. Maximum of the convolution: ${convMax.toFixed(2)} a.u. · s.`;
+}
+
+/* ---- Slider and layout that follows the container ------------------------ */
+
+const slider = document.getElementById("block-length");
+const valueOut = document.getElementById("block-value");
+const plotBox = document.getElementById("plot");
+
+function update() {
+  const length = Number(slider.value);
+  valueOut.textContent = `${length} s`;
+  slider.setAttribute("aria-valuetext", `${length} seconds`);
+  render(Math.max(280, Math.floor(plotBox.clientWidth)), length);
+}
+
+// The native range input handles the mouse, touch and the arrow, Home, End and
+// Page keys; the "input" event fires continuously while it moves.
+slider.addEventListener("input", update);
+
+// Redraw when the frame or the window changes width.
+let lastWidth = 0;
+new ResizeObserver(() => {
+  const w = Math.floor(plotBox.clientWidth);
+  if (w !== lastWidth) {
+    lastWidth = w;
+    update();
+  }
+}).observe(plotBox);
+
+update();
+</script>
+</body>
+</html>
