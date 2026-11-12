@@ -50,12 +50,16 @@
 <p class="notice">This is a test page for the embedding path. The chapter on the haemodynamic response rebuilds this illustration with its sources.</p>
 
 <div class="control">
-  <label for="block-length">Block length: <output id="block-value" for="block-length">10 s</output></label>
-  <input id="block-length" type="range" min="1" max="40" step="0.5" value="10" aria-describedby="readout">
+  <label for="block-length">Block length: <output id="block-value" for="block-length" aria-live="off">10 s</output></label>
+  <input id="block-length" type="range" min="1" max="40" step="0.5" value="10" aria-describedby="response-area readout">
 </div>
 
 <div id="plot" role="img" aria-label="Three stacked plots over time in seconds: a boxcar, a double-gamma response, and their convolution."></div>
-<p id="readout" class="readout" aria-live="polite"></p>
+<!-- Nothing on this page is a live region. A screen reader announces the slider's own
+     value text once per step; the visible value and readout follow the slider but are
+     not announced, and are read as the description of the slider when it takes focus. -->
+<p id="response-area" class="readout"></p>
+<p id="readout" class="readout"></p>
 
 <script src="vendor/d3.min.js"></script>
 <script>
@@ -64,9 +68,12 @@
 /* ---- Constants ---------------------------------------------------------- */
 
 // Placeholder values of the common canonical double-gamma shape (a positive lobe
-// peaking near 6 s, an undershoot peaking near 16 s, and a ratio of 1 to 6 between
-// their heights). They are to be sourced when the chapter is written. A gamma
-// density of integer shape k and unit scale has its mode at k - 1 seconds.
+// peaking near 6 s and an undershoot peaking near 16 s). They are to be sourced when
+// the chapter is written. A gamma density of integer shape k and unit scale has its
+// mode at k - 1 seconds. UNDERSHOOT_RATIO is the weight of the second density relative
+// to the first, 1 to 6, not a ratio of heights: the first density peaks at 0.1606 and
+// the second, once weighted, at 0.0165, so the lobes stand at about 9.7 to 1, and the
+// undershoot of the curve, which is scaled to a peak of 1, reaches -0.091.
 const PEAK_SHAPE = 7;
 const UNDERSHOOT_SHAPE = 17;
 const UNDERSHOOT_RATIO = 1 / 6;
@@ -221,10 +228,13 @@ function render(width, length) {
     });
 
   d3.select("#readout").text(
-    `Area of the response: ${responseArea.toFixed(2)} s. Maximum of the convolution in the window: ${d3.max(conv).toFixed(2)} a.u. · s.`);
+    `Maximum of the convolution in the window: ${d3.max(conv).toFixed(2)} a.u. · s.`);
 }
 
 /* ---- Slider and layout that follows the container ------------------------ */
+
+// The area of the response does not depend on the slider, so it is written once.
+d3.select("#response-area").text(`Area of the response: ${responseArea.toFixed(2)} s.`);
 
 const slider = d3.select("#block-length");
 const plotBox = d3.select("#plot").node();

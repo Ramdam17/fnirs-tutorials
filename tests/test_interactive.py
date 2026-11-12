@@ -650,3 +650,53 @@ def test_an_illustration_loads_scripts_only_from_the_vendor_folder(path: Path) -
     for source in script_sources(path.read_text(encoding="utf-8")):
         problem = script_problem(path, source, VENDOR_DIR)
         assert problem is None, f"{path.name} loads {source!r}: {problem}"
+
+
+# --------------------------------------------------------------------------------------
+# Live regions: a step of a slider must not be announced twice
+# --------------------------------------------------------------------------------------
+
+_TAG = re.compile(
+    r"<([a-z][a-z0-9-]*)\b((?:[^>\"']|\"[^\"]*\"|'[^']*')*)>", re.IGNORECASE
+)
+
+
+def live_regions(text: str) -> list[str]:
+    """Return the tags of a page that announce a change of their content.
+
+    A region is live when it carries ``aria-live`` with a value other than ``off``, a
+    role of ``status``, ``alert`` or ``log``, or is an ``<output>`` (whose implicit role
+    is ``status``) that does not say ``aria-live="off"``.
+    """
+    found = []
+    for match in _TAG.finditer(text):
+        name, attributes = match.group(1).lower(), match.group(2)
+        live = re.search(r"""aria-live\s*=\s*["']?(\w+)""", attributes, re.IGNORECASE)
+        role = re.search(r"""\brole\s*=\s*["']?(\w+)""", attributes, re.IGNORECASE)
+        value = live.group(1).lower() if live else None
+        is_live = (
+            (value is not None and value != "off")
+            or (
+                value is None
+                and role
+                and role.group(1).lower() in {"status", "alert", "log"}
+            )
+            or (value is None and name == "output")
+        )
+        if is_live:
+            found.append(match.group(0))
+    return found
+
+
+def test_the_live_region_reader_finds_each_kind() -> None:
+    assert len(live_regions('<p aria-live="polite"></p>')) == 1
+    assert len(live_regions("<p role=status></p>")) == 1
+    assert len(live_regions('<output id="v"></output>')) == 1
+    assert live_regions('<output id="v" aria-live="off"></output>') == []
+    assert live_regions('<p id="readout"></p>') == []
+
+
+@pytest.mark.parametrize("path", illustrations(), ids=lambda p: p.name)
+def test_an_illustration_has_at_most_one_live_region(path: Path) -> None:
+    regions = live_regions(path.read_text(encoding="utf-8"))
+    assert len(regions) <= 1, f"{path.name} has several live regions: {regions}"
