@@ -723,7 +723,57 @@ def test_an_illustration_has_at_most_one_live_region(path: Path) -> None:
 # The accessible name of a control must not change when its value does
 # --------------------------------------------------------------------------------------
 
-_CONTROLS = {"input", "select", "textarea"}
+_NATIVE_CONTROLS = {"input", "select", "textarea", "button"}
+# The widget and composite roles of WAI-ARIA 1.2, section 5.3.2
+# (https://www.w3.org/TR/wai-aria-1.2/#widget_roles); a separator is a widget only when
+# it can take the focus, which the reader tests with ``tabindex``.
+_WIDGET_ROLES = {
+    "button",
+    "checkbox",
+    "gridcell",
+    "link",
+    "menuitem",
+    "menuitemcheckbox",
+    "menuitemradio",
+    "option",
+    "progressbar",
+    "radio",
+    "scrollbar",
+    "searchbox",
+    "separator",
+    "slider",
+    "spinbutton",
+    "switch",
+    "tab",
+    "tabpanel",
+    "textbox",
+    "treeitem",
+    "combobox",
+    "grid",
+    "listbox",
+    "menu",
+    "menubar",
+    "radiogroup",
+    "tablist",
+    "tree",
+    "treegrid",
+}
+# The roles that ARIA lets take their name from their content, as a button does.
+_NAMED_FROM_CONTENT = {
+    "button",
+    "checkbox",
+    "gridcell",
+    "link",
+    "menuitem",
+    "menuitemcheckbox",
+    "menuitemradio",
+    "option",
+    "radio",
+    "switch",
+    "tab",
+    "treeitem",
+}
+_VALUE_BUTTONS = {"button", "submit", "reset"}
 
 
 def _attribute(attributes: str, name: str) -> str | None:
@@ -736,18 +786,17 @@ def _attribute(attributes: str, name: str) -> str | None:
     return next(g for g in found.groups() if g is not None) if found else None
 
 
-def _name_source_problem(text: str, tag: re.Match[str]) -> str | None:
-    """Say why an element that gives a name cannot be a static one, or return None.
-
-    The element must not be an ``<output>``, which holds a value that changes at every
-    step, and its content must be text without a tag. The content is read up to the first
-    closing tag of the same name.
-    """
+def _content(text: str, tag: re.Match[str]) -> tuple[int, int]:
+    """Return the span of the content of an element, up to the first closing tag of its name."""
     name = tag.group(1).lower()
-    if name == "output":
-        return "it is an <output>, whose value changes"
     closing = re.search(rf"</{name}\s*>", text[tag.end() :], re.IGNORECASE)
-    content = text[tag.end() : tag.end() + closing.start()] if closing else ""
+    if closing is None:
+        return tag.end(), tag.end()
+    return tag.end(), tag.end() + closing.start()
+
+
+def _static_text_problem(content: str) -> str | None:
+    """Say why a content cannot be a static name, or return None."""
     if "<" in content:
         return "it holds a tag"
     if not content.strip():
@@ -755,80 +804,192 @@ def _name_source_problem(text: str, tag: re.Match[str]) -> str | None:
     return None
 
 
-def control_name_problems(text: str) -> list[str]:
-    """Return what is wrong with the accessible names of the form controls of a page.
+def _name_source_problem(text: str, tag: re.Match[str]) -> str | None:
+    """Say why an element that gives a name cannot be a static one, or return None.
 
-    Every ``<input>`` (except a hidden one), ``<select>`` and ``<textarea>`` needs a name
-    from a ``<label for="id">`` or from the elements that ``aria-labelledby`` lists. Each
-    element that gives the name must be static text: no tag inside it and not an
+    The element must not be an ``<output>``, which holds a value that changes at every
+    step, and its content must be text without a tag.
+    """
+    if tag.group(1).lower() == "output":
+        return "it is an <output>, whose value changes"
+    start, end = _content(text, tag)
+    return _static_text_problem(text[start:end])
+
+
+def _wrapping_label_problem(
+    text: str, control: re.Match[str], labels: list[re.Match[str]]
+) -> tuple[bool, str | None]:
+    """Return whether a ``<label>`` wraps the control, and why its text is not static."""
+    for label in labels:
+        if _attribute(label.group(2), "for") is not None:
+            continue
+        start, end = _content(text, label)
+        if not start <= control.start() < end:
+            continue
+        inner = (control.start(), control.end())
+        if control.group(1).lower() != "input":
+            closing = re.compile(rf"</{control.group(1)}\s*>", re.IGNORECASE).search(
+                text, control.end()
+            )
+            inner = (control.start(), closing.end() if closing else control.end())
+        outside = text[start : inner[0]] + text[inner[1] : end]
+        return True, _static_text_problem(outside)
+    return False, None
+
+
+def control_name_problems(text: str) -> list[str]:
+    """Return what is wrong with the accessible names of the controls of a page.
+
+    The controls are every ``<input>`` (except a hidden one), ``<select>``,
+    ``<textarea>`` and ``<button>``, and every element whose ``role`` is a widget role of
+    WAI-ARIA 1.2 (``_WIDGET_ROLES``). A control needs a name from one of: a non-empty
+    ``aria-label`` or ``title``; a ``<label for="id">``; a ``<label>`` that wraps it;
+    the elements that ``aria-labelledby`` lists; for a button, a widget role that takes
+    its name from content and a button-type input, its own content or ``value``. Each
+    element or label text that gives the name must be text without a tag and not an
     ``<output>``, so that the name does not change when the value does and the control is
     not named by its own value.
+
+    This reads the HTML as written. A control that a script creates when the page runs is
+    out of its reach, and so is the markup inside a script string; the content of an
+    element is read up to the first closing tag of its name, so a nested element of the
+    same name makes the content look like it holds a tag.
     """
     tags = list(_TAG.finditer(text))
-    by_id = {}
+    by_id: dict[str, re.Match[str]] = {}
     for tag in tags:
         identifier = _attribute(tag.group(2), "id")
         if identifier:
             by_id.setdefault(identifier, tag)
-    labels: dict[str, list[re.Match[str]]] = {}
-    for tag in tags:
-        target = _attribute(tag.group(2), "for")
-        if tag.group(1).lower() == "label" and target:
-            labels.setdefault(target, []).append(tag)
+    labels = [tag for tag in tags if tag.group(1).lower() == "label"]
+    labels_for: dict[str, list[re.Match[str]]] = {}
+    for label in labels:
+        target = _attribute(label.group(2), "for")
+        if target:
+            labels_for.setdefault(target, []).append(label)
     problems = []
     for tag in tags:
-        if tag.group(1).lower() not in _CONTROLS:
+        name, attributes = tag.group(1).lower(), tag.group(2)
+        role = (_attribute(attributes, "role") or "").split()[:1]
+        role_name = role[0].lower() if role else ""
+        is_widget = role_name in _WIDGET_ROLES and not (
+            role_name == "separator" and _attribute(attributes, "tabindex") is None
+        )
+        if name not in _NATIVE_CONTROLS and not is_widget:
             continue
-        attributes = tag.group(2)
-        if (_attribute(attributes, "type") or "").lower() == "hidden":
+        kind = (_attribute(attributes, "type") or "").lower()
+        if name == "input" and kind == "hidden":
             continue
+        named, found = False, []
+        if (_attribute(attributes, "aria-label") or "").strip():
+            named = True
+        if (_attribute(attributes, "title") or "").strip():
+            named = True
+        if name == "input" and kind in _VALUE_BUTTONS:
+            named = named or bool((_attribute(attributes, "value") or "").strip())
         identifier = _attribute(attributes, "id")
-        sources = list(labels.get(identifier, [])) if identifier else []
+        sources = list(labels_for.get(identifier, [])) if identifier else []
         for reference in (_attribute(attributes, "aria-labelledby") or "").split():
             if reference in by_id:
                 sources.append(by_id[reference])
             else:
-                problems.append(
-                    f"{tag.group(0)} is named by {reference!r}, which is absent"
-                )
-        if not sources:
-            problems.append(f"{tag.group(0)} has no name")
+                found.append(f"is named by {reference!r}, which is absent")
         for source in sources:
             reason = _name_source_problem(text, source)
             if reason:
-                problems.append(
-                    f"{tag.group(0)} is named by {source.group(0)}: {reason}"
-                )
+                found.append(f"is named by {source.group(0)}: {reason}")
+            else:
+                named = True
+        wraps, reason = _wrapping_label_problem(text, tag, labels)
+        if wraps:
+            if reason:
+                found.append(f"is named by the label that wraps it: {reason}")
+            else:
+                named = True
+        if not named and (name == "button" or role_name in _NAMED_FROM_CONTENT):
+            start, end = _content(text, tag)
+            reason = _static_text_problem(text[start:end])
+            if reason:
+                found.append(f"is named by its own content: {reason}")
+            else:
+                named = True
+        if not named and not found:
+            found.append("has no name")
+        problems.extend(f"{tag.group(0)} {message}" for message in found)
     return problems
 
 
-def test_the_name_reader_has_its_own_cases() -> None:
-    sound = (
+NAME_SOUND = {
+    "label for": '<label for="a">Length</label><input id="a" type="range">',
+    "label for with its output beside": (
         '<label for="a">Length</label>: <output id="v" for="a">1 s</output>'
         '<input id="a" type="range">'
-    )
-    assert control_name_problems(sound) == []
-    assert (
-        control_name_problems(
-            '<span id="n">Length</span><select aria-labelledby="n"></select>'
-        )
-        == []
-    )
-    assert control_name_problems('<input id="a" type="hidden">') == []
-    no_name = '<input id="a" type="range"><output id="v" for="a">1 s</output>'
-    assert len(control_name_problems(no_name)) == 1
-    assert "has no name" in control_name_problems(no_name)[0]
-    own_value = (
-        '<input id="a" type="range" aria-labelledby="v">'
-        '<output id="v" for="a">1 s</output>'
-    )
-    assert "<output>" in control_name_problems(own_value)[0]
-    inside = '<label for="a">Length: <output id="v">1 s</output></label><input id="a">'
-    assert "holds a tag" in control_name_problems(inside)[0]
-    assert "absent" in control_name_problems('<input id="a" aria-labelledby="gone">')[0]
-    empty = '<label for="a"></label><input id="a">'
-    assert "holds no text" in control_name_problems(empty)[0]
-    assert len(control_name_problems('<textarea id="t"></textarea>')) == 1
+    ),
+    "wrapping label": "<label>Length <input type=range></label>",
+    "wrapping label around a select": "<label>Pick <select><option>a</option></select></label>",
+    "aria-label": '<input type="range" aria-label="Length">',
+    "title": '<input type="range" title="Length">',
+    "aria-labelledby on static text": (
+        '<span id="n">Length</span><select aria-labelledby="n"></select>'
+    ),
+    "button with text": "<button>Play</button>",
+    "button with an aria-label and a changing content": (
+        '<button aria-label="Play"><span>0:01</span></button>'
+    ),
+    "button-type input with a value": '<input type="submit" value="Send">',
+    "widget role with aria-label": '<g role="slider" aria-label="Length"></g>',
+    "widget role named from content": '<div role="tab">Overview</div>',
+    "hidden input": '<input id="a" type="hidden">',
+    "role that is not a widget": '<div role="img"></div>',
+    "separator that cannot take the focus": '<hr role="separator">',
+    "a link without a role is not read": '<a href="#">x</a>',
+}
+NAME_REFUSED = {
+    "no name on an input": ('<input id="a" type="range">', "has no name"),
+    "no name on a textarea": ('<textarea id="t"></textarea>', "has no name"),
+    "no name on a button": ("<button></button>", "holds no text"),
+    "no name on a widget role": ('<g role="slider"></g>', "has no name"),
+    "empty aria-label": ('<input aria-label=" " type="range">', "has no name"),
+    "a focusable separator": (
+        '<div role="separator" tabindex="0"></div>',
+        "has no name",
+    ),
+    "named by its own output": (
+        '<input id="a" type="range" aria-labelledby="v"><output id="v" for="a">1 s</output>',
+        "<output>",
+    ),
+    "widget role named by its own output": (
+        '<g role="slider" aria-labelledby="v"></g><output id="v">1 s</output>',
+        "<output>",
+    ),
+    "a tag inside the label": (
+        '<label for="a">Length: <output id="v">1 s</output></label><input id="a">',
+        "holds a tag",
+    ),
+    "an output inside the wrapping label": (
+        "<label>Length <output>1 s</output><input></label>",
+        "holds a tag",
+    ),
+    "a button that holds a changing value": (
+        "<button>Length <output>1 s</output></button>",
+        "holds a tag",
+    ),
+    "an absent target": ('<input id="a" aria-labelledby="gone">', "absent"),
+    "an empty label": ('<label for="a"></label><input id="a">', "holds no text"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(NAME_SOUND))
+def test_the_name_reader_accepts_each_sound_source(case: str) -> None:
+    assert control_name_problems(NAME_SOUND[case]) == []
+
+
+@pytest.mark.parametrize("case", sorted(NAME_REFUSED))
+def test_the_name_reader_refuses_each_unsound_name(case: str) -> None:
+    html, reason = NAME_REFUSED[case]
+    problems = control_name_problems(html)
+    assert len(problems) == 1, problems
+    assert reason in problems[0]
 
 
 @pytest.mark.parametrize("path", illustrations(), ids=lambda p: p.name)
