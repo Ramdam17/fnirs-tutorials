@@ -198,14 +198,15 @@ function pathFor(values, xScale, yScale) {
   return d;
 }
 
-function drawCurve(svg, scales, values, colour, label, labelAt, geom) {
+function drawCurve(svg, scales, values, colour, label, geom) {
   svg.appendChild(el("path", { d: pathFor(values, scales.xScale, scales.yScale), fill: "none", stroke: colour, "stroke-width": 2.2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
-  // Direct label: a short swatch of the curve colour, then the name in the text colour.
-  // The offset shrinks on a narrow frame so that the label stays inside the plot.
-  const x = geom.left + 10 + Math.max(0, Math.min(labelAt.dx, geom.width - 190));
-  const y = geom.top + 12 + labelAt.dy;
-  svg.appendChild(el("line", { x1: x, x2: x + 18, y1: y - 4, y2: y - 4, stroke: colour, "stroke-width": 2.2, "stroke-linecap": "round" }));
-  svg.appendChild(el("text", { x: x + 24, y, class: "curve-label" }, label));
+  // Direct label at the top right of the panel, where all three curves are flat at zero
+  // (the block ends before the right edge): the name in the text colour, then a short
+  // swatch of the curve colour.
+  const right = geom.left + geom.width - 8;
+  const y = geom.top + 14;
+  svg.appendChild(el("text", { x: right - 24, y, "text-anchor": "end", class: "curve-label" }, label));
+  svg.appendChild(el("line", { x1: right - 18, x2: right, y1: y - 4, y2: y - 4, stroke: colour, "stroke-width": 2.2, "stroke-linecap": "round" }));
 }
 
 const response = makeResponse();
@@ -225,9 +226,9 @@ function render(width, length) {
   const plateauAxisMax = Math.ceil(responseArea);   // the axis is fixed so that the slider visibly changes the curve
 
   const panels = [
-    { values: boxcar, colour: "var(--boxcar)", label: "Boxcar", yMin: 0, yMax: 1.2, yTicks: [0, 0.5, 1], yTitle: "Stimulus (a.u.)", labelAt: { dx: 0, dy: 0 } },
-    { values: responseOnPlot, colour: "var(--response)", label: "Haemodynamic response", yMin: -0.4, yMax: 1.2, yTicks: [-0.4, 0, 0.5, 1], yTitle: "Response (a.u.)", labelAt: { dx: 150, dy: 0 } },
-    { values: conv, colour: "var(--convolution)", label: "Convolution", yMin: -1, yMax: plateauAxisMax, yTicks: niceTicks(plateauAxisMax, 3), yTitle: "Convolution (a.u. · s)", labelAt: { dx: 0, dy: 0 } },
+    { values: boxcar, colour: "var(--boxcar)", label: "Boxcar", yMin: 0, yMax: 1.2, yTicks: [0, 0.5, 1], yTitle: "Stimulus (a.u.)" },
+    { values: responseOnPlot, colour: "var(--response)", label: "Haemodynamic response", yMin: -0.4, yMax: 1.2, yTicks: [-0.4, 0, 0.5, 1], yTitle: "Response (a.u.)" },
+    { values: conv, colour: "var(--convolution)", label: "Convolution", yMin: -1, yMax: plateauAxisMax, yTicks: niceTicks(plateauAxisMax, 3), yTitle: "Convolution (a.u. · s)" },
   ];
   // The convolution can dip below zero in its undershoot; keep the zero line visible.
   panels[2].yMin = Math.min(-0.5, Math.floor(Math.min(...conv) * 2) / 2);
@@ -236,7 +237,7 @@ function render(width, length) {
     const geom = { left: MARGIN.left, width: innerWidth, top: MARGIN.top + k * (PANEL_HEIGHT + PANEL_GAP), height: PANEL_HEIGHT };
     spec.showTimeLabels = k === panels.length - 1;
     const scales = drawPanel(svg, geom, spec);
-    drawCurve(svg, scales, spec.values, spec.colour, spec.label, spec.labelAt, geom);
+    drawCurve(svg, scales, spec.values, spec.colour, spec.label, geom);
   });
 
   const xTitleY = MARGIN.top + 3 * PANEL_HEIGHT + 2 * PANEL_GAP + 38;
@@ -244,7 +245,7 @@ function render(width, length) {
 
   plot.replaceChildren(svg);
   document.getElementById("readout").textContent =
-    `Area of the response: ${responseArea.toFixed(2)} s. Maximum of the convolution: ${convMax.toFixed(2)} a.u. · s.`;
+    `Area of the response: ${responseArea.toFixed(2)} s. Maximum of the convolution in the window: ${convMax.toFixed(2)} a.u. · s.`;
 }
 
 /* ---- Slider and layout that follows the container ------------------------ */
