@@ -24,6 +24,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -2148,8 +2149,10 @@ def snapshot(folder: Path) -> dict[str, tuple[Any, ...]]:
     """Describe every entry under ``folder`` without following a link.
 
     A folder is ``("dir",)``, a link is ``("link", text of the link)``, and a file is
-    ``("file", bytes, st_mtime_ns)``, so that a rewrite with the same bytes, a link that
-    is pointed elsewhere and a folder that is replaced by a link are all seen.
+    ``("file", bytes, st_ctime_ns)``, so that a rewrite with the same bytes, a link that
+    is pointed elsewhere and a folder that is replaced by a link are all seen. The change
+    time is the one that ``shutil.copy2`` cannot copy from the source, unlike the
+    modification time, and any write to the file moves it.
     """
     if not os.path.lexists(folder):
         return {}
@@ -2163,16 +2166,38 @@ def snapshot(folder: Path) -> dict[str, tuple[Any, ...]]:
             elif path.is_dir():
                 found[key] = ("dir",)
             else:
-                found[key] = ("file", path.read_bytes(), path.stat().st_mtime_ns)
+                found[key] = ("file", path.read_bytes(), path.stat().st_ctime_ns)
     return found
 
 
+def test_the_snapshot_sees_a_file_copied_again_from_an_unchanged_source(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.txt"
+    source.write_text("same", encoding="utf-8")
+    staged = tmp_path / "stage" / "source.txt"
+    staged.parent.mkdir()
+    shutil.copy2(source, staged)
+    before = snapshot(tmp_path / "stage")
+    assert snapshot(tmp_path / "stage") == before, (
+        "reading must not change the snapshot"
+    )
+    time.sleep(0.01)
+    shutil.copy2(source, staged)
+    assert staged.stat().st_mtime_ns == source.stat().st_mtime_ns
+    assert snapshot(tmp_path / "stage") != before
+
+
 def project_with_stale_stage(tmp_path: Path, static: list[str] | None = None) -> Path:
-    """Make a project whose staging folder holds what an earlier build left."""
+    """Make a project whose staging folder holds what a sound build left.
+
+    The staged copies come from a build of the project as it stands, before ``static`` is
+    added to ``myst.yml``: the next build writes them again, so a refusal that rewrote
+    one with the same bytes would show in the snapshot.
+    """
     root = make_project(tmp_path, ["notebook_smoke", "no_code"])
     write_files(root, ["interactive/a.html", "interactive/Vendor/d3.js"])
-    if static is not None:
-        add_to_myst(root, {"static_files": static}, {})
+    build_book.stage_book(root, root / "_build" / "executed")
     write_files(
         root / "_build" / "executed",
         [
@@ -2181,6 +2206,8 @@ def project_with_stale_stage(tmp_path: Path, static: list[str] | None = None) ->
             "interactive/old.html",
         ],
     )
+    if static is not None:
+        add_to_myst(root, {"static_files": static}, {})
     return root
 
 
@@ -2481,6 +2508,7 @@ def test_a_destination_that_is_a_link_is_not_written_through(tmp_path: Path) -> 
     root = project_with_stale_stage(tmp_path)
     outside = folder_outside(tmp_path)
     executed = root / "_build" / "executed"
+    (executed / "myst.yml").unlink()
     (executed / "myst.yml").symlink_to(outside / "keep.txt")
     before, beyond = snapshot(executed), snapshot(outside)
     error = refuse(root, executed)
@@ -2912,6 +2940,7 @@ def scenario_linked_destination(
     root = project_with_stale_stage(tmp_path)
     outside = folder_outside(tmp_path)
     executed = root / "_build" / "executed"
+    (executed / "myst.yml").unlink()
     (executed / "myst.yml").symlink_to(outside / "keep.txt")
     return executed, [outside], build_book.EXIT_BAD_EXECUTED_DIR, "is a link"
 
@@ -2921,6 +2950,7 @@ def scenario_folder_at_a_write(
 ) -> Scenario:
     root = project_with_stale_stage(tmp_path)
     executed = root / "_build" / "executed"
+    (executed / "myst.yml").unlink()
     (executed / "myst.yml").mkdir()
     (executed / "myst.yml" / "inner.txt").write_text("keep", encoding="utf-8")
     return executed, [], build_book.EXIT_BAD_EXECUTED_DIR, "a folder"
