@@ -2525,3 +2525,291 @@ def test_a_string_of_myst_yml_in_another_case_that_nothing_stages_is_only_warned
     add_to_myst(root, {"description": "Notes/README.TXT"}, {})
     build_book.stage_book(root, root / "_build" / "executed")
     assert "Notes/README.TXT" in caplog.text
+
+
+Scenario = tuple[Path, list[Path], int, str]
+"""The staging folder, the folders beside it that nothing may touch, the exit code and a
+fragment of the message the refusal must have."""
+
+
+def scenario_static(entry: str, code: int, fragment: str) -> Any:
+    def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Scenario:
+        root = project_with_stale_stage(tmp_path, [entry])
+        write_files(root, ["data/fresh/small.csv"])
+        return root / "_build" / "executed", [], code, fragment
+
+    return setup
+
+
+def scenario_link_to_file(target: str) -> Any:
+    def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Scenario:
+        root = project_with_stale_stage(tmp_path, ["interactive"])
+        write_files(root, ["data/fresh/secret.csv", "book/page.md"])
+        (tmp_path / "outside-repo.txt").write_text("x", encoding="utf-8")
+        (root / "interactive" / "link.txt").symlink_to((root / target).resolve())
+        return root / "_build" / "executed", [], build_book.EXIT_FILE_ERROR, "link.txt"
+
+    return setup
+
+
+def scenario_link_to_folder(target: str) -> Any:
+    def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Scenario:
+        root = project_with_stale_stage(tmp_path, ["interactive"])
+        write_files(root, ["data/fresh/secret.csv"])
+        (tmp_path / "outside-dir").mkdir()
+        (root / "interactive" / "linked").symlink_to(
+            (root / target).resolve(), target_is_directory=True
+        )
+        return root / "_build" / "executed", [], build_book.EXIT_FILE_ERROR, "linked"
+
+    return setup
+
+
+def scenario_entry_in_staging(entry: str) -> Any:
+    def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Scenario:
+        root = project_with_stale_stage(tmp_path, [entry])
+        executed = root / "out" / "stage"
+        shutil.copytree(root / "_build" / "executed", executed)
+        return executed, [], build_book.EXIT_FILE_ERROR, "staging folder"
+
+    return setup
+
+
+def scenario_not_placeable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Scenario:
+    root = project_with_stale_stage(tmp_path)
+    (tmp_path / "elsewhere.txt").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(
+        build_book, "find_static_files", lambda *_args: [tmp_path / "elsewhere.txt"]
+    )
+    return (
+        root / "_build" / "executed",
+        [],
+        build_book.EXIT_FILE_ERROR,
+        "elsewhere.txt",
+    )
+
+
+def scenario_stale_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Scenario:
+    root = project_with_stale_stage(tmp_path)
+    os.utime(root / "_build" / "executed" / NOTEBOOK, (1.0, 1.0))
+    return (
+        root / "_build" / "executed",
+        [],
+        build_book.EXIT_NOT_EXECUTED,
+        "older than its source",
+    )
+
+
+def scenario_failed_notebook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Scenario:
+    root = project_with_stale_stage(tmp_path)
+    write_timings(root, {NOTEBOOK: {"status": "error"}})
+    return root / "_build" / "executed", [], build_book.EXIT_NOT_EXECUTED, "'error'"
+
+
+def scenario_no_timing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Scenario:
+    root = project_with_stale_stage(tmp_path)
+    write_timings(root, {"book/other.ipynb": {"status": "passed"}})
+    return (
+        root / "_build" / "executed",
+        [],
+        build_book.EXIT_NOT_EXECUTED,
+        "has no entry",
+    )
+
+
+def scenario_no_executed_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Scenario:
+    root = project_with_stale_stage(tmp_path)
+    (root / "_build" / "executed" / NOTEBOOK).unlink()
+    return (
+        root / "_build" / "executed",
+        [],
+        build_book.EXIT_NOT_EXECUTED,
+        "no executed copy",
+    )
+
+
+def scenario_bad_toc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Scenario:
+    root = project_with_stale_stage(tmp_path)
+    document = {"version": 1, "project": {"toc": [{"pattern": "book/*.ipynb"}]}}
+    (root / "myst.yml").write_text(yaml.safe_dump(document), encoding="utf-8")
+    return root / "_build" / "executed", [], build_book.EXIT_BAD_TOC, "pattern"
+
+
+def scenario_not_a_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Scenario:
+    root = project_with_stale_stage(tmp_path)
+    add_to_myst(root, {"static_files": "interactive"}, {})
+    return (
+        root / "_build" / "executed",
+        [],
+        build_book.EXIT_FILE_ERROR,
+        "must be a list of paths",
+    )
+
+
+def scenario_link_in_another_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Scenario:
+    root = project_with_stale_stage(tmp_path, ["interactive"])
+    (root / "interactive" / "alias.js").symlink_to(
+        root / "interactive" / "VENDOR" / "D3.JS"
+    )
+    return root / "_build" / "executed", [], build_book.EXIT_FILE_ERROR, "spells"
+
+
+def scenario_toc_page_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Scenario:
+    root = project_with_stale_stage(tmp_path)
+    path = root / "myst.yml"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("book/no_code.md", "Book/No_Code.md"),
+        encoding="utf-8",
+    )
+    return root / "_build" / "executed", [], build_book.EXIT_BAD_TOC, "Book/No_Code.md"
+
+
+def scenario_executed_is_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Scenario:
+    root = project_with_stale_stage(tmp_path)
+    return root, [], build_book.EXIT_BAD_EXECUTED_DIR, "repository root"
+
+
+def scenario_reference_in_another_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Scenario:
+    root = project_with_stale_stage(tmp_path)
+    (root / "book" / "no_code.md").write_text(
+        "![d](/Images/FIG.png)\n", encoding="utf-8"
+    )
+    write_files(root, ["images/fig.png"])
+    return (
+        root / "_build" / "executed",
+        [],
+        build_book.EXIT_FILE_ERROR,
+        "'/Images/FIG.png'",
+    )
+
+
+def scenario_string_in_another_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Scenario:
+    root = project_with_stale_stage(tmp_path)
+    add_to_myst(root, {"description": "Book/NO_CODE.md"}, {})
+    return (
+        root / "_build" / "executed",
+        [],
+        build_book.EXIT_FILE_ERROR,
+        "worded otherwise",
+    )
+
+
+def scenario_linked_notebook_in_an_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Scenario:
+    root = make_project(tmp_path, ["notebook_smoke"])
+    add_to_myst(root, {"static_files": ["book"]}, {})
+    link_the_notebook_of_the_book(root)
+    write_files(root / "_build" / "executed", ["_build/site/content/stale.json"])
+    monkeypatch.setattr(build_book, "check_static_entries", lambda *_args: None)
+    monkeypatch.setattr(build_book, "_refuse_links_out_of", lambda *_args: None)
+    return (
+        root / "_build" / "executed",
+        [],
+        build_book.EXIT_BAD_EXECUTED_DIR,
+        "notebook command",
+    )
+
+
+def scenario_linked_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Scenario:
+    root = project_with_stale_stage(tmp_path, ["interactive"])
+    write_files(root, ["plugins/p.mjs"])
+    add_to_myst(root, {"plugins": ["plugins/p.mjs"]}, {})
+    outside = folder_outside(tmp_path)
+    executed = root / "_build" / "executed"
+    (executed / "plugins").symlink_to(outside, target_is_directory=True)
+    return executed, [outside], build_book.EXIT_BAD_EXECUTED_DIR, "a link"
+
+
+def scenario_linked_build_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Scenario:
+    root = project_with_stale_stage(tmp_path)
+    executed = root / "_build" / "executed"
+    outside = folder_outside(tmp_path)
+    shutil.copytree(executed / "_build", outside / "moved")
+    shutil.rmtree(executed / "_build")
+    (executed / "_build").symlink_to(outside / "moved", target_is_directory=True)
+    return executed, [outside], build_book.EXIT_BAD_EXECUTED_DIR, "a link"
+
+
+def scenario_linked_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Scenario:
+    root = project_with_stale_stage(tmp_path)
+    outside = folder_outside(tmp_path)
+    executed = root / "_build" / "executed"
+    (executed / "myst.yml").symlink_to(outside / "keep.txt")
+    return executed, [outside], build_book.EXIT_BAD_EXECUTED_DIR, "is a link"
+
+
+FILE = build_book.EXIT_FILE_ERROR
+REFUSING_SCENARIOS = {
+    "entry absent": scenario_static("absent", FILE, "names no file"),
+    "entry outside": scenario_static("../outside", FILE, "points outside"),
+    "entry data": scenario_static("data", FILE, "never staged"),
+    "entry data/fresh": scenario_static("data/fresh", FILE, "never staged"),
+    "entry _build": scenario_static("_build", FILE, "never staged"),
+    "entry root": scenario_static(".", FILE, "the repository itself"),
+    "entry in another case": scenario_static(
+        "Interactive", FILE, "spelled differently"
+    ),
+    "entry Data/fresh": scenario_static("Data/fresh", FILE, "spelled differently"),
+    "entry holds the book folder": scenario_static("book", FILE, "holds the page"),
+    "entry is a page": scenario_static("book/no_code.md", FILE, "holds the page"),
+    "entry is a notebook": scenario_static(
+        "book/notebook_smoke.ipynb", FILE, "holds the page"
+    ),
+    "entry is the staging folder": scenario_entry_in_staging("out/stage"),
+    "entry is its parent": scenario_entry_in_staging("out"),
+    "link to a data file": scenario_link_to_file("data/fresh/secret.csv"),
+    "link to a page": scenario_link_to_file("book/page.md"),
+    "link to a file outside": scenario_link_to_file("../outside-repo.txt"),
+    "link to the data folder": scenario_link_to_folder("data/fresh"),
+    "link to the book folder": scenario_link_to_folder("book"),
+    "link to a folder outside": scenario_link_to_folder("../outside-dir"),
+    "link target in another case": scenario_link_in_another_case,
+    "static_files is not a list": scenario_not_a_list,
+    "staged path outside the root": scenario_not_placeable,
+    "table of contents refused": scenario_bad_toc,
+    "page of the toc in another case": scenario_toc_page_case,
+    "copy older than its notebook": scenario_stale_copy,
+    "notebook recorded as failed": scenario_failed_notebook,
+    "notebook without a timing": scenario_no_timing,
+    "missing executed copy": scenario_no_executed_copy,
+    "staging folder is the root": scenario_executed_is_root,
+    "reference of a page in another case": scenario_reference_in_another_case,
+    "string of myst.yml in another case": scenario_string_in_another_case,
+    "linked notebook in a static entry": scenario_linked_notebook_in_an_entry,
+    "folder of the staging folder is a link": scenario_linked_folder,
+    "_build of the staging folder is a link": scenario_linked_build_folder,
+    "destination is a link": scenario_linked_destination,
+}
+
+
+@pytest.mark.usefixtures("case_blind_disk")
+@pytest.mark.parametrize("name", sorted(REFUSING_SCENARIOS))
+def test_a_refused_build_leaves_the_staging_folder_as_it_found_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    monkeypatch.delenv("BASE_URL", raising=False)
+    executed, beside, code, fragment = REFUSING_SCENARIOS[name](tmp_path, monkeypatch)
+    root = tmp_path / "repo"
+    watched = [executed, *beside]
+    before = [snapshot(folder) for folder in watched]
+    assert before[0], "the scenario must leave something in the staging folder"
+    error = refuse(root, executed)
+    assert (error.exit_code, fragment in str(error)) == (code, True), str(error)
+    assert [snapshot(folder) for folder in watched] == before
