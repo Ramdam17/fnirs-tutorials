@@ -6,6 +6,15 @@ illustration loads anything from another host: a page of the book must work offl
 Colab and on the deployed site alike, and an illustration that fetched a script from a
 content-delivery network would break the day that address changes.
 
+A third assertion covers the one library the illustrations use, D3, which is copied into
+``interactive/vendor/``. The file is pinned by its size and its SHA-256, so that a changed
+or replaced library fails the suite, and a page may load a script only by a relative
+address that resolves to a file of that folder. The vendored file is not scanned by the
+detector below. It is third-party code that holds namespace strings and its own address in
+a comment, and ``fetch`` calls that run only if a page passes them an address; the scan of
+the pages covers that case, since a page that passed an external address would be found
+there.
+
 The detector of the second assertion has its own tests, one per kind of load, because an
 assertion that a file holds no external load only means something when the detector is
 known to find one of each kind.
@@ -16,6 +25,7 @@ When to use: run with the rest of the suite,
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import re
@@ -264,3 +274,141 @@ def test_no_illustration_loads_a_resource_from_another_host(path: Path) -> None:
 
 def test_there_is_an_illustration_to_check() -> None:
     assert illustrations()
+
+
+# --------------------------------------------------------------------------------------
+# The vendored library and the scripts a page may load
+# --------------------------------------------------------------------------------------
+
+VENDOR_DIR = INTERACTIVE_DIR / "vendor"
+D3_VERSION = "7.9.2"
+# dist/d3.min.js of the npm package d3 at the version above.
+D3_SIZE_BYTES = 280_622
+D3_SHA256 = "912111098ea99503a6f4967361d2bbdc9dbf58cf9c678c8e27e5b02d1a07f0c1"
+
+
+def sha256_of(path: Path) -> str:
+    """Return the SHA-256 of a file, as lower-case hexadecimal."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def library_problem(path: Path, size: int, digest: str) -> str | None:
+    """Say how a file differs from the recorded size and hash, or return None."""
+    if not path.is_file():
+        return f"{path} does not exist"
+    if path.stat().st_size != size:
+        return f"{path.name} has {path.stat().st_size} bytes, expected {size}"
+    if sha256_of(path) != digest:
+        return f"{path.name} has another SHA-256 than the recorded {digest}"
+    return None
+
+
+def test_the_vendored_d3_is_the_recorded_version() -> None:
+    problem = library_problem(VENDOR_DIR / "d3.min.js", D3_SIZE_BYTES, D3_SHA256)
+    assert problem is None, f"D3 {D3_VERSION}: {problem}"
+    header = (VENDOR_DIR / "d3.min.js").read_text(encoding="utf-8").splitlines()[0]
+    assert f"v{D3_VERSION}" in header
+
+
+def test_the_vendored_d3_comes_with_its_licence() -> None:
+    licence = VENDOR_DIR / "LICENSE"
+    assert licence.is_file()
+    assert "Mike Bostock" in licence.read_text(encoding="utf-8")
+
+
+def test_a_changed_or_missing_library_is_reported(tmp_path: Path) -> None:
+    real = (VENDOR_DIR / "d3.min.js").read_bytes()
+    same_size = tmp_path / "same_size.js"
+    same_size.write_bytes(b"x" + real[1:])
+    shorter = tmp_path / "shorter.js"
+    shorter.write_bytes(real[:-1])
+    for path, fragment in ((same_size, "SHA-256"), (shorter, "bytes")):
+        problem = library_problem(path, D3_SIZE_BYTES, D3_SHA256)
+        assert problem is not None and fragment in problem
+    missing = library_problem(tmp_path / "absent.js", D3_SIZE_BYTES, D3_SHA256)
+    assert missing is not None and "does not exist" in missing
+
+
+def script_problem(page: Path, source: str, vendor_dir: Path) -> str | None:
+    """Say why a ``<script src>`` is not allowed, or return None.
+
+    A script is allowed when its source is a relative address that resolves, from the
+    folder of the page, to an existing file under ``vendor_dir``.
+    """
+    if _EXTERNAL.match(source) or re.match(
+        r"^[a-z][a-z0-9+.-]*:", source, re.IGNORECASE
+    ):
+        return "it has a scheme or names another host"
+    if source.startswith("/"):
+        return "it is an absolute path"
+    target = (page.parent / source).resolve()
+    if not target.is_relative_to(vendor_dir.resolve()):
+        return "it does not resolve to a file under vendor/"
+    if not target.is_file():
+        return "the file does not exist"
+    return None
+
+
+def script_sources(text: str) -> list[str]:
+    """Return the ``src`` of every ``<script>`` tag of a page."""
+    return _LOADS["script"].findall(text)
+
+
+@pytest.fixture
+def fake_site(tmp_path: Path) -> tuple[Path, Path]:
+    """An ``interactive`` folder with a page, a vendored file and a stray file."""
+    folder = tmp_path / "interactive"
+    (folder / "vendor").mkdir(parents=True)
+    (folder / "vendor" / "lib.js").write_text("x", encoding="utf-8")
+    (folder / "other").mkdir()
+    (folder / "other" / "lib.js").write_text("x", encoding="utf-8")
+    (folder / "secret.js").write_text("x", encoding="utf-8")
+    return folder / "page.html", folder / "vendor"
+
+
+def test_a_relative_script_under_vendor_is_allowed(
+    fake_site: tuple[Path, Path],
+) -> None:
+    page, vendor = fake_site
+    assert script_problem(page, "vendor/lib.js", vendor) is None
+    assert script_problem(page, "./vendor/lib.js", vendor) is None
+
+
+@pytest.mark.parametrize(
+    ("source", "fragment"),
+    [
+        ("/interactive/vendor/lib.js", "absolute"),
+        ("https://cdn.example.org/lib.js", "scheme"),
+        ("//cdn.example.org/lib.js", "scheme"),
+        ("data:text/javascript,1", "scheme"),
+        ("blob:abc", "scheme"),
+        ("other/lib.js", "under vendor/"),
+        ("secret.js", "under vendor/"),
+        ("vendor/../secret.js", "under vendor/"),
+        ("../interactive/secret.js", "under vendor/"),
+        ("../../outside.js", "under vendor/"),
+        ("vendor/missing.js", "does not exist"),
+        ("vendor", "does not exist"),
+    ],
+)
+def test_any_other_script_is_refused_with_its_reason(
+    fake_site: tuple[Path, Path], source: str, fragment: str
+) -> None:
+    page, vendor = fake_site
+    problem = script_problem(page, source, vendor)
+    assert problem is not None and fragment in problem
+
+
+def test_the_script_tags_of_a_page_are_all_read() -> None:
+    text = (
+        '<script src="vendor/a.js"></script><p>x</p>'
+        "<script defer src='vendor/b.js'></script><script>inline()</script>"
+    )
+    assert script_sources(text) == ["vendor/a.js", "vendor/b.js"]
+
+
+@pytest.mark.parametrize("path", illustrations(), ids=lambda p: p.name)
+def test_an_illustration_loads_scripts_only_from_the_vendor_folder(path: Path) -> None:
+    for source in script_sources(path.read_text(encoding="utf-8")):
+        problem = script_problem(path, source, VENDOR_DIR)
+        assert problem is None, f"{path.name} loads {source!r}: {problem}"
