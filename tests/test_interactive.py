@@ -723,27 +723,115 @@ def test_an_illustration_has_at_most_one_live_region(path: Path) -> None:
 # The accessible name of a control must not change when its value does
 # --------------------------------------------------------------------------------------
 
-_LABEL = re.compile(r"<label\b[^>]*>(.*?)</label>", re.IGNORECASE | re.DOTALL)
+_CONTROLS = {"input", "select", "textarea"}
 
 
-def labels_with_markup(text: str) -> list[str]:
-    """Return the labels that hold a tag: an ``<output>`` or a ``<span>`` that changes.
-
-    The text of a ``<label>`` is the accessible name of its control. A value written inside
-    it makes the name change at each step, on top of the value text of the control.
-    """
-    return [m.group(0) for m in _LABEL.finditer(text) if "<" in m.group(1)]
-
-
-def test_the_label_reader_finds_a_value_inside_a_label() -> None:
-    inside = '<label for="a">Length: <output id="v">1 s</output></label>'
-    assert labels_with_markup(inside) == [inside]
-    assert (
-        labels_with_markup('<label for="a">Length</label>: <output>1 s</output>') == []
+def _attribute(attributes: str, name: str) -> str | None:
+    """Return the value of an attribute written in a tag, or None when it is absent."""
+    found = re.search(
+        rf"""(?<![\w-]){name}\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))""",
+        attributes,
+        re.IGNORECASE,
     )
+    return next(g for g in found.groups() if g is not None) if found else None
+
+
+def _name_source_problem(text: str, tag: re.Match[str]) -> str | None:
+    """Say why an element that gives a name cannot be a static one, or return None.
+
+    The element must not be an ``<output>``, which holds a value that changes at every
+    step, and its content must be text without a tag. The content is read up to the first
+    closing tag of the same name.
+    """
+    name = tag.group(1).lower()
+    if name == "output":
+        return "it is an <output>, whose value changes"
+    closing = re.search(rf"</{name}\s*>", text[tag.end() :], re.IGNORECASE)
+    content = text[tag.end() : tag.end() + closing.start()] if closing else ""
+    if "<" in content:
+        return "it holds a tag"
+    if not content.strip():
+        return "it holds no text"
+    return None
+
+
+def control_name_problems(text: str) -> list[str]:
+    """Return what is wrong with the accessible names of the form controls of a page.
+
+    Every ``<input>`` (except a hidden one), ``<select>`` and ``<textarea>`` needs a name
+    from a ``<label for="id">`` or from the elements that ``aria-labelledby`` lists. Each
+    element that gives the name must be static text: no tag inside it and not an
+    ``<output>``, so that the name does not change when the value does and the control is
+    not named by its own value.
+    """
+    tags = list(_TAG.finditer(text))
+    by_id = {}
+    for tag in tags:
+        identifier = _attribute(tag.group(2), "id")
+        if identifier:
+            by_id.setdefault(identifier, tag)
+    labels: dict[str, list[re.Match[str]]] = {}
+    for tag in tags:
+        target = _attribute(tag.group(2), "for")
+        if tag.group(1).lower() == "label" and target:
+            labels.setdefault(target, []).append(tag)
+    problems = []
+    for tag in tags:
+        if tag.group(1).lower() not in _CONTROLS:
+            continue
+        attributes = tag.group(2)
+        if (_attribute(attributes, "type") or "").lower() == "hidden":
+            continue
+        identifier = _attribute(attributes, "id")
+        sources = list(labels.get(identifier, [])) if identifier else []
+        for reference in (_attribute(attributes, "aria-labelledby") or "").split():
+            if reference in by_id:
+                sources.append(by_id[reference])
+            else:
+                problems.append(
+                    f"{tag.group(0)} is named by {reference!r}, which is absent"
+                )
+        if not sources:
+            problems.append(f"{tag.group(0)} has no name")
+        for source in sources:
+            reason = _name_source_problem(text, source)
+            if reason:
+                problems.append(
+                    f"{tag.group(0)} is named by {source.group(0)}: {reason}"
+                )
+    return problems
+
+
+def test_the_name_reader_has_its_own_cases() -> None:
+    sound = (
+        '<label for="a">Length</label>: <output id="v" for="a">1 s</output>'
+        '<input id="a" type="range">'
+    )
+    assert control_name_problems(sound) == []
+    assert (
+        control_name_problems(
+            '<span id="n">Length</span><select aria-labelledby="n"></select>'
+        )
+        == []
+    )
+    assert control_name_problems('<input id="a" type="hidden">') == []
+    no_name = '<input id="a" type="range"><output id="v" for="a">1 s</output>'
+    assert len(control_name_problems(no_name)) == 1
+    assert "has no name" in control_name_problems(no_name)[0]
+    own_value = (
+        '<input id="a" type="range" aria-labelledby="v">'
+        '<output id="v" for="a">1 s</output>'
+    )
+    assert "<output>" in control_name_problems(own_value)[0]
+    inside = '<label for="a">Length: <output id="v">1 s</output></label><input id="a">'
+    assert "holds a tag" in control_name_problems(inside)[0]
+    assert "absent" in control_name_problems('<input id="a" aria-labelledby="gone">')[0]
+    empty = '<label for="a"></label><input id="a">'
+    assert "holds no text" in control_name_problems(empty)[0]
+    assert len(control_name_problems('<textarea id="t"></textarea>')) == 1
 
 
 @pytest.mark.parametrize("path", illustrations(), ids=lambda p: p.name)
 def test_an_illustration_names_its_controls_with_static_text(path: Path) -> None:
-    labels = labels_with_markup(path.read_text(encoding="utf-8"))
-    assert labels == [], f"{path.name} has a value or markup inside a label: {labels}"
+    problems = control_name_problems(path.read_text(encoding="utf-8"))
+    assert problems == [], f"{path.name}: {problems}"
