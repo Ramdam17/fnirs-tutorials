@@ -40,12 +40,18 @@ def case_blind_disk(monkeypatch: pytest.MonkeyPatch) -> None:
     The Mac of the lab has such a disk and the Linux runner has not, so a test that
     depends on it has to mean the same on both. ``Path.resolve`` keeps the spelling it
     was given on such a disk (measured on APFS), so it is left alone; the probes that
-    answer "does this exist" and "is this the same file" ignore case.
+    answer "does this exist" and "is this the same file" ignore case, and so does the
+    opening of a path for reading, which ``read_text`` and ``read_bytes`` go through.
+
+    It does not cover what a test never asks of a path that comes from the book: opening
+    for writing, ``Path.stat``, ``os.listdir`` and ``os.walk`` answer as the real disk
+    does, with the spelling stored. A path that cannot be folded is opened as given.
     """
     real_is_file = Path.is_file
     real_is_dir = Path.is_dir
     real_exists = Path.exists
     real_samefile = os.path.samefile
+    real_open = Path.open
 
     def probe(real: Any) -> Any:
         def wrapped(self: Path) -> bool:
@@ -58,6 +64,12 @@ def case_blind_disk(monkeypatch: pytest.MonkeyPatch) -> None:
         one, two = _fold_to_disk(first), _fold_to_disk(second)
         return one is not None and two is not None and real_samefile(one, two)
 
+    def opening(self: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        if not set(mode) & set("wax+"):
+            self = _fold_to_disk(self) or self
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", opening)
     monkeypatch.setattr(Path, "is_file", probe(real_is_file))
     monkeypatch.setattr(Path, "is_dir", probe(real_is_dir))
     monkeypatch.setattr(Path, "exists", probe(real_exists))

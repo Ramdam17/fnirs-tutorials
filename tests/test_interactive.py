@@ -350,26 +350,13 @@ def test_every_illustration_a_page_embeds_exists(page: str, source: str) -> None
     assert problem is None, f"{page} embeds {source}: {problem}"
 
 
+@pytest.mark.usefixtures("case_blind_disk")
 def test_an_embedded_source_must_match_the_name_of_the_file_letter_for_letter(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     (tmp_path / "sub").mkdir()
     (tmp_path / "sub" / "banana.html").write_text("x", encoding="utf-8")
     assert embedded_problem("/interactive/sub/banana.html", tmp_path) is None
-    # Make the file system ignore case, as the Mac's does, so that this test checks the
-    # exact-name rule on the Linux runner too.
-    real_is_file = Path.is_file
-
-    def ignoring_case(self: Path) -> bool:
-        if real_is_file(self):
-            return True
-        parent = self.parent
-        return parent.is_dir() and any(
-            p.name.lower() == self.name.lower() and real_is_file(p)
-            for p in parent.iterdir()
-        )
-
-    monkeypatch.setattr(Path, "is_file", ignoring_case)
     for wrong in ("/interactive/sub/Banana.html", "/interactive/SUB/banana.html"):
         problem = embedded_problem(wrong, tmp_path)
         assert problem is not None and "exactly" in problem, wrong

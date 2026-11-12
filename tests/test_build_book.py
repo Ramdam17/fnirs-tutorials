@@ -1714,22 +1714,10 @@ def test_a_raw_frame_in_the_html_stops_the_script_with_exit_18(
 # --------------------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("case_blind_disk")
 def test_a_frame_target_whose_case_differs_from_the_file_is_refused(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
-    """On the Mac ``is_file`` ignores case; here it is made to, so Linux checks it too."""
-    real = build_book.is_file_or_absent
-
-    def ignoring_case(path: Path) -> bool:
-        if real(path):
-            return True
-        parent = path.parent
-        return parent.is_dir() and any(
-            p.name.lower() == path.name.lower() and p.is_file()
-            for p in parent.iterdir()
-        )
-
-    monkeypatch.setattr(build_book, "is_file_or_absent", ignoring_case)
     problems = check_one(
         tmp_path,
         "/interactive/HRF.html",
