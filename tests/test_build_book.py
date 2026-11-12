@@ -1410,6 +1410,88 @@ def test_a_static_folder_that_cannot_be_copied_exits_with_a_named_code(
     assert "cannot stage interactive/a.html" in caplog.text
 
 
+def test_rglob_does_not_list_the_files_behind_a_link_to_a_folder(
+    tmp_path: Path,
+) -> None:
+    """Measured on this Python: a link to a folder is listed, but not entered.
+
+    The folder is therefore silently left out of what is staged, which is why the
+    refusal of a link must not rely on the files that ``rglob`` returns.
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("x", encoding="utf-8")
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    (folder / "linked").symlink_to(outside, target_is_directory=True)
+    listed = sorted(p.name for p in folder.rglob("*"))
+    assert listed == ["linked"]
+    assert [p for p in folder.rglob("*") if p.is_file()] == []
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["data/fresh/secret.csv", "book/page.md", "../outside-repo.txt"],
+)
+def test_a_link_to_a_file_out_of_its_static_folder_is_refused(
+    tmp_path: Path, target: str
+) -> None:
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"])
+    add_to_myst(root, {"static_files": ["interactive"]}, {})
+    write_files(root, ["interactive/a.html", "data/fresh/secret.csv", "book/page.md"])
+    (tmp_path / "outside-repo.txt").write_text("x", encoding="utf-8")
+    link = root / "interactive" / "link.txt"
+    link.symlink_to((root / target).resolve())
+    with pytest.raises(build_book.BookError) as stop:
+        build_book.stage_book(root, root / "_build" / "executed")
+    assert stop.value.exit_code == build_book.EXIT_FILE_ERROR
+    assert "link.txt" in str(stop.value)
+    assert Path(target).name in str(stop.value)
+    assert not (root / "_build" / "executed" / "data").exists()
+
+
+@pytest.mark.parametrize("target", ["data/fresh", "book", "../outside-dir"])
+def test_a_link_to_a_folder_out_of_its_static_folder_is_refused(
+    tmp_path: Path, target: str
+) -> None:
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"])
+    add_to_myst(root, {"static_files": ["interactive"]}, {})
+    write_files(root, ["interactive/a.html", "data/fresh/secret.csv"])
+    (tmp_path / "outside-dir").mkdir()
+    (root / "interactive" / "linked").symlink_to(
+        (root / target).resolve(), target_is_directory=True
+    )
+    with pytest.raises(build_book.BookError) as stop:
+        build_book.stage_book(root, root / "_build" / "executed")
+    assert stop.value.exit_code == build_book.EXIT_FILE_ERROR
+    assert "linked" in str(stop.value)
+
+
+def test_a_link_that_stays_inside_its_static_folder_is_accepted(
+    tmp_path: Path,
+) -> None:
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"])
+    add_to_myst(root, {"static_files": ["interactive"]}, {})
+    write_files(root, ["interactive/a.html"])
+    (root / "interactive" / "alias.html").symlink_to(root / "interactive" / "a.html")
+    staged = build_book.stage_book(root, root / "_build" / "executed")
+    assert Path("interactive/a.html") in staged.copied
+
+
+def test_a_staged_path_that_cannot_be_placed_under_the_root_is_a_book_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = make_project(tmp_path, ["notebook_smoke", "no_code"])
+    (tmp_path / "elsewhere.txt").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(
+        build_book, "find_static_files", lambda *_args: [tmp_path / "elsewhere.txt"]
+    )
+    with pytest.raises(build_book.BookError) as stop:
+        build_book.stage_book(root, root / "_build" / "executed")
+    assert stop.value.exit_code == build_book.EXIT_FILE_ERROR
+    assert "elsewhere.txt" in str(stop.value)
+
+
 def test_the_target_of_a_frame_is_staged_only_through_the_static_folder(
     tmp_path: Path,
 ) -> None:

@@ -519,6 +519,35 @@ def find_config_files(
     return found
 
 
+def _refuse_links_out_of(folder: Path, myst_path: Path) -> None:
+    """Refuse a symbolic link of a static folder whose target lies outside the folder.
+
+    ``rglob`` lists a link to a folder without entering it (measured by
+    ``test_rglob_does_not_list_the_files_behind_a_link_to_a_folder``), so the files
+    behind such a link would be left out without a word; and a link to a file would be
+    staged at the place its target resolves to, which for a link into ``data/`` copies
+    a data file into the staging folder. Every entry that is a link is therefore
+    resolved, whatever it points to, and refused when the result is not under ``folder``.
+    ``folder`` must be resolved.
+
+    Raises
+    ------
+    BookError
+        With ``EXIT_FILE_ERROR``, naming the link and its target.
+    """
+    for entry in sorted(folder.rglob("*")):
+        if not entry.is_symlink():
+            continue
+        target = entry.resolve()
+        if target != folder and folder not in target.parents:
+            raise BookError(
+                EXIT_FILE_ERROR,
+                f"{entry} in a static folder of {myst_path} is a link to {target}, "
+                f"which is not under {folder}. A static folder publishes only the "
+                "files that lie in it; replace the link by a copy of the file.",
+            )
+
+
 def find_static_files(
     document: dict[str, Any], myst_path: Path, root: Path
 ) -> list[Path]:
@@ -548,8 +577,8 @@ def find_static_files(
     ------
     BookError
         With ``EXIT_FILE_ERROR`` when ``static_files`` is not a list of strings, when an
-        entry does not exist, or when it lies outside the repository or under ``data/`` or
-        ``_build/``. A static folder that is missing would publish a frame target that
+        entry does not exist, when it lies outside the repository or under ``data/`` or
+        ``_build/``, or when a symbolic link inside a folder points out of that folder. A static folder that is missing would publish a frame target that
         does not exist, and MyST would not say so.
     """
     project = document.get("project")
@@ -578,6 +607,7 @@ def find_static_files(
         if path.is_file():
             candidates = [path]
         elif path.is_dir():
+            _refuse_links_out_of(path, myst_path)
             candidates = sorted(p for p in path.rglob("*") if p.is_file())
         else:
             raise BookError(
@@ -701,7 +731,14 @@ def stage_book(root: Path, executed_dir: Path) -> StagedBook:
         if resolved in copied:
             continue
         copied.add(resolved)
-        relative = resolved.relative_to(root.resolve())
+        try:
+            relative = resolved.relative_to(root.resolve())
+        except ValueError:
+            raise BookError(
+                EXIT_FILE_ERROR,
+                f"cannot stage {source}: it resolves to {resolved}, which is not "
+                f"under the repository {root}.",
+            ) from None
         destination = executed_dir / relative
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
