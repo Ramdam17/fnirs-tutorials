@@ -2083,6 +2083,42 @@ def test_a_path_that_cannot_be_listed_is_kept_as_given(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------------------
 
 
+class Recorded:
+    """The copies and removals the script performed, each with its destination."""
+
+    def __init__(self) -> None:
+        self.copies: list[Path] = []
+        self.removals: list[Path] = []
+
+    def clear(self) -> None:
+        self.copies.clear()
+        self.removals.clear()
+
+
+@pytest.fixture
+def recorded(monkeypatch: pytest.MonkeyPatch) -> Recorded:
+    """Record every ``shutil.copy2`` and ``build_book._remove`` call, then run it.
+
+    This observes what the script does whatever the clock of the file system says, so a
+    test that uses it does not depend on two writes landing in different ticks. A test
+    that starts from a staging folder built by the script calls ``clear`` afterwards.
+    """
+    record = Recorded()
+    real_copy, real_remove = shutil.copy2, build_book._remove
+
+    def copy2(source: Any, destination: Any, *args: Any, **kwargs: Any) -> Any:
+        record.copies.append(Path(destination))
+        return real_copy(source, destination, *args, **kwargs)
+
+    def remove(path: Path) -> bool:
+        record.removals.append(Path(path))
+        return real_remove(path)
+
+    monkeypatch.setattr(build_book.shutil, "copy2", copy2)
+    monkeypatch.setattr(build_book, "_remove", remove)
+    return record
+
+
 def snapshot(folder: Path) -> dict[str, tuple[Any, ...]]:
     """Describe every entry under ``folder`` without following a link.
 
@@ -2120,7 +2156,20 @@ def test_the_snapshot_sees_a_file_copied_again_from_an_unchanged_source(
     assert snapshot(tmp_path / "stage") == before, (
         "reading must not change the snapshot"
     )
-    time.sleep(0.01)
+    # Wait until the clock of the file system is seen to move, so that the second copy
+    # cannot land in the tick of the first.
+    probe = tmp_path / "probe.txt"
+    first = None
+    deadline = time.monotonic() + 5
+    while True:
+        probe.write_text("tick", encoding="utf-8")
+        stamp = probe.stat().st_ctime_ns
+        first = stamp if first is None else first
+        if stamp != first:
+            break
+        if time.monotonic() > deadline:
+            pytest.fail("the change time of this file system did not move in 5 s")
+        time.sleep(0.001)
     shutil.copy2(source, staged)
     assert staged.stat().st_mtime_ns == source.stat().st_mtime_ns
     assert snapshot(tmp_path / "stage") != before
@@ -2599,7 +2648,7 @@ def test_the_operations_that_touch_what_the_script_does_not_own_are_refused(
 
 
 def test_the_plan_lists_every_operation_below_the_staging_folder_and_changes_nothing(
-    tmp_path: Path,
+    tmp_path: Path, recorded: Recorded
 ) -> None:
     root = project_with_stale_stage(tmp_path, ["interactive"])
     executed = root / "_build" / "executed"
@@ -2625,7 +2674,10 @@ def test_the_plan_lists_every_operation_below_the_staging_folder_and_changes_not
         assert not any(folder.is_symlink() for folder in between)
         assert not (op.kind == "copy" and op.path.is_symlink())
     elsewhere = snapshot_beside(tmp_path, executed)
+    recorded.clear()
     build_book.execute_stage(plan)
+    assert recorded.copies == [op.path for op in plan.copies]
+    assert recorded.removals == removals
     assert snapshot(outside) == beyond
     assert snapshot_beside(tmp_path, executed) == elsewhere
     after = snapshot(executed)
@@ -2638,7 +2690,9 @@ def test_the_plan_lists_every_operation_below_the_staging_folder_and_changes_not
         for parent in Path(write).parents
         if parent != Path(".")
     }
-    assert {key for key in changed if after[key][0] != "dir"} == writes
+    # A rewrite in the tick of the earlier write may not show in the snapshot, so the
+    # recorder states which files were written; the snapshot only has to find nothing else.
+    assert {key for key in changed if after[key][0] != "dir"} <= writes
     assert {key for key in changed if after[key][0] == "dir"} <= above
     assert gone
     assert all(
@@ -2984,14 +3038,20 @@ REFUSING_SCENARIOS = {
 @pytest.mark.usefixtures("case_blind_disk")
 @pytest.mark.parametrize("name", sorted(REFUSING_SCENARIOS))
 def test_a_refused_build_leaves_the_staging_folder_as_it_found_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recorded: Recorded,
+    name: str,
 ) -> None:
     monkeypatch.delenv("BASE_URL", raising=False)
     executed, beside, code, fragment = REFUSING_SCENARIOS[name](tmp_path, monkeypatch)
+    recorded.clear()
     root = tmp_path / "repo"
     watched = [executed, *beside]
     before = [snapshot(folder) for folder in watched]
     assert before[0], "the scenario must leave something in the staging folder"
     error = refuse(root, executed)
     assert (error.exit_code, fragment in str(error)) == (code, True), str(error)
+    assert recorded.copies == [], "a refused build copied a file"
+    assert recorded.removals == [], "a refused build removed an entry"
     assert [snapshot(folder) for folder in watched] == before
