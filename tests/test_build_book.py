@@ -2581,6 +2581,7 @@ def test_a_static_entry_that_holds_a_linked_notebook_is_refused_by_ownership(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, other_checks: str
 ) -> None:
     root = make_project(tmp_path, ["notebook_smoke"])
+    build_book.stage_book(root, root / "_build" / "executed")
     add_to_myst(root, {"static_files": ["book"]}, {})
     link_the_notebook_of_the_book(root)
     executed = root / "_build" / "executed"
@@ -2921,6 +2922,7 @@ def scenario_linked_notebook_in_an_entry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Scenario:
     root = make_project(tmp_path, ["notebook_smoke"])
+    build_book.stage_book(root, root / "_build" / "executed")
     add_to_myst(root, {"static_files": ["book"]}, {})
     link_the_notebook_of_the_book(root)
     write_files(root / "_build" / "executed", ["_build/site/content/stale.json"])
